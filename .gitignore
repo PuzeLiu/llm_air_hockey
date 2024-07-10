@@ -33,3 +33,6 @@ ENV/
 *.swp
 *.tmp
 *~
+
+response*.txt
+prompt*.txt
