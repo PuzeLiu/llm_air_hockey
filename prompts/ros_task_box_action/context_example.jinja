@@ -1,0 +1,48 @@
+Examples of solving similar tasks are shown below.
+
+Example 1:
+Task description: Put the two box_1 and box_2 into the bowl.
+The code:
+```python
+def action_sequence():
+    go_home()
+    open_gripper()
+    names_to_bowl = ["box_1", "box_2"]
+    for name in names_to_bowl:
+        reach_to_box(name)
+        close_gripper()
+        go_to_bowl()
+        open_gripper()
+        go_home()
+```
+
+Example 2:
+Task description: stack box_2 on box_3.
+The code:
+```python
+def action_sequence():
+    go_home()
+    open_gripper()
+    reach_to_box("box_2")
+    close_gripper()
+    go_home()
+    reach_to_box("box_3", zoffset=0.05)
+    open_gripper()
+    go_home()
+```
+
+Example 3:
+Task description: Put the two box_1 and box_2 into the sink.
+The code:
+```python
+def action_sequence():
+    go_home()
+    open_gripper()
+    names_to_sink = ["box_1", "box_2"]
+    for name in names_to_sink:
+        reach_to_box(name)
+        close_gripper()
+        go_to_sink()
+        open_gripper()
+        go_home()
+```

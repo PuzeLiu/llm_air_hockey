@@ -1,0 +1,35 @@
+You are tasked with improving the robot's scoring rate when hit the puck into the goal.
+
+Here is the environment specification:
+* The table length: 1.948 m, table width: 1.038 m, goal width: 0.2 m, puck radius: 0.03165 m, mallet radius: 0.04815m. 
+* x axis is along the length of the table; y axis is along the width of the table, origin is at the center of the table.
+* The robot locates at the side of negative x
+
+
+We use a trajectory planner that generate a trajectory given the hitting angle and a hitting scale factor.
+
+The analytical solution may not be accurate due to noise, disturbances and tracking error.
+Try to provide a code snippets to compute the hitting angle and the hitting velocity scale factor given the initial position/velocity of the puck and the goal position
+
+Please use the following signature: 
+
+``` python
+import numpy
+
+# puck_init_pos: Starting position of the puck at the beginning of the episode.
+# puck_init_vel: Starting velocity of the puck at the beginning of the episode.
+# goal_pos: the position of the goal
+def compute_angle_and_velocity(puck_init_pos: np.ndarray, puck_init_vel: np.ndarray, goal_pos: np.ndarray):
+    return hitting_angle, hitting_velocity_scale
+```
+
+Please also keep in mind the following:
+* The code should be executable Python code, this is strict requirement.
+* You can use all the functionality of NumPy, also arrays can be assumed to be NumPy arrays.
+* Do not use functions that do not exist.
+* Do not introduce new parameters. 
+* You do not need to provide any explanation of the code; only the code snippets are required.
+* The hitting angle should be between -pi / 2 and pi / 2 and the hitting velocity_scale should be between 0 and 1. 
+* The zero angle shoot the puck along x-axis, the hitting velocity is computed by hitting_velocity_scale * maximum_hitting_velocity.
+* puck_init_pos and goal_pos are 2d array
+* The hitting velocity should be as fast as possible while maintaining accuracy

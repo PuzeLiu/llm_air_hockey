@@ -1,0 +1,16 @@
+Please note the following:
+* You can only choose actions from the list above, you cannot create new actions.
+* Generate python code.
+
+{%- set human_feedbacks = memory.retrieve_all({memory.mem_keys.HUMAN_FEEDBACK: 1.0})[::-1] -%}
+{%- if memory.retrieve({memory.mem_keys.HUMAN_FEEDBACK: 1.0}) %}
+
+Please consider the human feedback:
+{%- for obs in human_feedbacks %}
+* {{human_feedbacks[loop.index0]}}
+{%- endfor %}
+{%- endif %}
+
+The task that you must complete is described as follows: {%- if memory.retrieve({memory.mem_keys.HUMAN_INSTRUCTION: 1.0}) %} {{memory.retrieve({memory.mem_keys.HUMAN_INSTRUCTION: 1.0})}}
+{%- endif %}
+

@@ -1,0 +1,52 @@
+You are a control engineer tasked with tuning the gains for a PID controller.
+You need to tune the gains for a PID-based torque controller for a 7 joint robot arm.
+A PID controller is implemented for each joint.
+
+Please use the following signature:
+
+```python
+Kp = [] # proportional gain
+Ki = [] # integral gain
+Kd = [] # derivative gain
+```
+You need to fill in the elements for Kp, Ki, and Kd.
+
+Note also
+* The first element refers to the joint at the robot base.
+* The elements of each list do not need to be equal, please be sure to explore different values.
+* You should not exeed values of 1000 for Kp gains, and 100 for Ki and Kd gains.
+* You must provide values for Kp, Ki, Kd in valid Python code, this is a strict requirement.
+
+The following gains were tested and recieved a fitness value of -2019.75.
+```python
+Kp = [100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0]
+Ki = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+Kd = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007]
+```
+
+
+The following gains were tested and recieved a fitness value of -11633.34.
+```python
+Kp = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+Ki = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+Kd = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007]
+```
+
+
+The following gains were tested and recieved a fitness value of -1331.93.
+```python
+Kp = [500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0]
+Ki = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+Kd = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+```
+
+
+The following gains were tested and recieved a fitness value of -13477.85.
+```python
+Kp = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+Ki = [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+Kd = [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+```
+
+
+You should choose PID gains that maximize fitness.

@@ -1,0 +1,82 @@
+Examples of solving similar tasks are shown below.
+
+Example 1:
+Task description: put mug onto the coffee machine's mug holder.
+Thought: the steps to do the task are 1. open gripper. 2. move arm to mug. 3. close gripper. 4. move arm to mug holder. 5. open gripper.
+The code:
+```python
+def action_sequence():
+    # put mug on the coffee machine's holder
+    open_gripper()
+    reach_to('mug')
+    close_gripper()
+    reach_to('mug_holder')
+    open_gripper()
+```
+
+Example 2:
+Task description: the coffee is in cabinet, we need to open cabinet and take out the bowl that contains coffee powder.
+Thought: the steps to do the task are: 1. move arm to cabinet. 2. open cabinet. 3. open gripper. 4. move arm to bowl. 5. close gripper 6. pull out bowl.
+The code:
+```python
+def action_sequence():
+    # open the cabinet
+    reach_to('cabinet')
+    open_cabinet()
+    # pull out bowl from cabinet
+    open_gripper()
+    reach_to('bowl')
+    close_gripper()
+    pull_out_bowl()
+```
+
+Example 3:
+Task description: grab the spoon to put coffee powder from bowl to coffee machine
+Thought: the steps to do the task are: 1. grab the spoon. 2. put coffee powder in coffee machine
+The code:
+```python
+def action_sequence():
+    # grab the spoon
+    open_gripper()
+    reach_to('spoon')
+    close_gripper()
+    # put coffee powder in coffee machine
+    reach_to('bowl')
+    scoop_coffee()
+    reach_to('coffee_machine')
+    pour()
+```
+
+Example 4:
+Task description: grab the spoon to put coffee powder from bowl to coffee machine then put back spoon.
+Thought: the steps to do the task are: 1. grab the spoon. 2. put coffee powder in coffee machine 3. put back the spoon to sink.
+The code:
+```python
+def action_sequence():
+    # grab the spoon
+    open_gripper()
+    reach_to('spoon')
+    close_gripper()
+    # put coffee powder in coffee machine
+    reach_to('bowl')
+    scoop_coffee()
+    reach_to('coffee_machine')
+    pour()
+    # put back spoon
+    reach_to('sink')
+    open_gripper()
+```
+
+Example 5:
+Task description: close the lid of coffee machine and switch on coffee machine.
+Thought: the steps to do the task are:  1. close the lid of coffee machine. 2. switch on coffee machine.
+The code:
+```python
+def action_sequence():
+    # close the lid of coffee machine
+    reach_to('coffee_machine')
+    close_lid()
+    # switch on the coffee machine
+    reach_to('coffee_machine')
+    switch_on_coffee_machine()
+```

@@ -1,0 +1,15 @@
+{%- set observations = memory.retrieve_all({memory.mem_keys.OBSERVATION: 1.0})[::-1] -%}
+
+Available Objects:
+
+{%- for observation in memory.retrieve({memory.mem_keys.OBSERVATION: 1.0}) %}
+* {{ observation }}
+{%- endfor %}
+
+Available Actions:
+* reach_to_box(name, zoffset=0.0): move arm to <name> position with offset on z axis, the height of box is 0.05, make sure use zoffset when stacking box.
+* close_gripper(): close the gripper
+* open_gripper(): open the gripper
+* go_to_bowl(): move arm to bowl position
+* go_to_sink(): move arm to bowl position
+
