@@ -5,17 +5,36 @@ class angle_offset:
   value: float = <float> # The offset value added to the hitting angle (this should be a float)
 ```
 
-Here is a history of previous experiments:
+An example of what what is expected from you to implement is as follows.
+```python
+class angle_offset:
+  value: float = 0.03
+```
+
+The following is a history of previous experiments and their results:
+
+The following angle_offset resulted in a final distance to goal of 0.10253570708551207.
+```python
+class angle_offset:
+  value: float = 0.0
+```
+
+The following angle_offset resulted in a final distance to goal of 1.5001974105495772.
+```python
+class angle_offset:
+  value: float = 1.57
+```
 
 {{expr_results}}
 Think about the results above when choosing a new value for the angle_offset.
 
+Let's think step by step.
+
 Please also keep in mind the following:
+* The angle_offset value should be between -np.pi/2 and np.pi/2, values outside this range should be avoided.
 * Do not use or create variables that do not exist.
-* Only write a small amount of code, you only need to provide a float value for the angle_offset variable in your response. This is a strict requirement.
+* Only provide the value class variable for the angle_offset class, as above in the signature.
 * The goal position is {{goal_pos}}.
-* The distance to the goal should be as small as possible.
-* Note, the initial position and velocity is always the same.
-* Do not use functions or variables that do not exist.
-* You do not need to explain your reasoning.
-* It is a good idea to try out different values, do not keep trying 0.0, you can try different values.
+* The angle_offset should be chosen such that the distance to goal is as small as possible.
+* Do not explain your reasoning.
+* It is a good idea to try out values that are not listed above in the results, unless they lead to a minimized distance to the goal.
