@@ -6,22 +6,55 @@ from openai import OpenAI
 from air_hockey_llm.environments.air_hockey_hit import IiwaPositionHit
 from air_hockey_llm.baseline_agent_instruct import BaselineAgent
 
+expr_result_line = """
+The following angle_offset resulted in a final distance to goal of {dist}.
+```python
+class angle_offset:
+  value: float = {offset}
+```
 
-def query_model(port, chat_history):
+"""
+
+query_index = 0
+
+def query_model(port, chat_history, cat_chat_history=True):
+
+    global query_index
+
     api_key = "EMPTY"
     api_base = f"http://localhost:{port}/v1"
     client = OpenAI(api_key=api_key, base_url=api_base)
     model = "deepseek-ai/deepseek-coder-6.7b-instruct"
 
+    if cat_chat_history:
+
+        content = ""
+        for chat in chat_history:
+            content += chat['content']
+            content += '\n'
+
+        chat_history_use = [{'role': 'user', 'content': content}]
+    else:
+        chat_history_use = chat_history
+
+    with open(f'prompt{query_index}.txt', 'w') as fp:
+        fp.write(chat_history_use[0]['content'])
+
     completion = client.chat.completions.create(
         model=model,
-        messages=chat_history,
+        #messages=chat_history,
+        messages=chat_history_use,
         max_tokens=2048,
         temperature=0.1
     )
 
-    chat_history.append({"role": "assistant",
-                         "content": completion.choices[0].message.content})
+    with open(f'response{query_index}.txt', 'w') as fr:
+        fr.write(completion.choices[0].message.content)
+
+    query_index += 1
+
+    # chat_history.append({"role": "assistant",
+    #                      "content": completion.choices[0].message.content})
 
     return completion.choices[0].message.content
 
@@ -68,10 +101,16 @@ def main(port, prompt_dir):
     initial_prompt = jinja_env.get_template("initial.jinja").render()
     chat_history = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": initial_prompt}]
-    answer = query_model(port=port, chat_history=chat_history)
-    print("Answer: ", answer)
-    compute_angle_and_velocity = process_answer(answer)
+    # answer = query_model(port=port, chat_history=chat_history)
+    # print("Answer: ", answer)
+    # compute_angle_and_velocity = process_answer(answer)
+    first_prompt = jinja_env.get_template('first.jinja').render()
+    # chat_history = [
+    #     {'role': 'system', 'content': system_prompt},
+    #     {'role': 'user', 'content': first_prompt},
+    # ]    
     prev_hit_angle = list()
+    prev_angle_offset = list()
     prev_puck_final_pos = list()
     prev_dist_to_goal = list()
     angle_offset = 0.
@@ -88,11 +127,14 @@ def main(port, prompt_dir):
         puck_vel = obs[3:5]
         goal_pos = np.array([0.938, 0.0])
 
-        angle, velocity_scale = compute_angle_and_velocity(puck_init_pos=puck_pos, puck_init_vel=puck_vel, goal_pos=goal_pos)
+        # angle, velocity_scale = compute_angle_and_velocity(puck_init_pos=puck_pos, puck_init_vel=puck_vel, goal_pos=goal_pos)
+        diff = goal_pos - puck_pos
+        angle = np.arctan2(diff[1], diff[0])
+        velocity_scale = 1.0
         # angle_offset = compute_angle_offset(angle, np.array(prev_hit_angle), np.array(prev_puck_final_pos), goal_pos)
         angle += angle_offset
         agent.set_instruction({'hit_angle': angle, 'hit_velocity': velocity_scale})
-        
+
         print(f"Hit Angle: {angle}, Hit Velocity Scale: {velocity_scale}, Offset: {angle_offset}")
 
         n_steps = 0
@@ -110,31 +152,47 @@ def main(port, prompt_dir):
         puck_final_pos = obs[:2] - np.array([1.51, 0.])
         dist_to_goal = np.linalg.norm(puck_final_pos - goal_pos)
 
-        prev_hit_angle.append(angle)
-        prev_puck_final_pos.append(puck_final_pos)
-        prev_dist_to_goal.append(dist_to_goal)
+        if angle_offset not in prev_angle_offset:
+            prev_hit_angle.append(angle)
+            prev_angle_offset.append(angle_offset)
+            prev_puck_final_pos.append(puck_final_pos)
+            prev_dist_to_goal.append(dist_to_goal)
 
         if dist_to_goal < 0.1:
             print("Goal! Start a new trial.")
         else:
+
+            expr_results = ""
+            for offset, dist in zip(prev_angle_offset, prev_dist_to_goal):
+                expr_results += expr_result_line.format(dist=dist, offset=offset)
+
             continue_prompt = jinja_env.get_template("continue.jinja").render(
-                hit_angle=prev_hit_angle, puck_final_position=prev_puck_final_pos, dist_to_goal=prev_dist_to_goal,
-                goal_pos=goal_pos)
+                expr_results=expr_results,
+                goal_pos=goal_pos,
+            )
+
+
+                # hit_angle=prev_hit_angle, angle_offset=prev_angle_offset, puck_final_position=prev_puck_final_pos, dist_to_goal=prev_dist_to_goal,
+                # goal_pos=goal_pos)
 
             print("#########################################")
             print("New prompt: ", continue_prompt)
+            chat_history = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': first_prompt},
+            ]
             chat_history.append({"role": "user", "content": continue_prompt})
             answer = query_model(port=port, chat_history=chat_history)
-            code_snippet = process_answer(answer)
-            print("Answer: ", answer)
-            class CodeSnippet:
-                angle_offset = 0.
-                exec(code_snippet)
-            angle_offset = CodeSnippet.angle_offset
-            chat_history.pop(-1)
-            chat_history.pop(-1)
-            print("Angle Offset: ", angle_offset)
-
+            try:
+                code_snippet = process_answer(answer)
+                print("Answer: ", answer)
+                class CodeSnippet:
+                    angle_offset = 0.
+                    exec(code_snippet)
+                angle_offset = CodeSnippet.angle_offset.value
+                print("Angle Offset: ", angle_offset)
+            except Exception as e:
+                pass
 
 if __name__ == '__main__':
     port = 8080
