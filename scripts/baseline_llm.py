@@ -45,7 +45,8 @@ def query_model(port, chat_history, cat_chat_history=True):
         #messages=chat_history,
         messages=chat_history_use,
         max_tokens=2048,
-        temperature=0.1
+        # temperature=0.1
+        temperature=0.6,
     )
 
     with open(f'response{query_index}.txt', 'w') as fr:
@@ -94,7 +95,7 @@ def main(port, prompt_dir):
         autoescape=jinja2.select_autoescape(enabled_extensions=('jinja'), default_for_string=True)
     )
 
-    n_episodes = 10
+    n_episodes = 30
     env.reset()
 
     system_prompt = jinja_env.get_template("system.jinja").render()
@@ -152,7 +153,7 @@ def main(port, prompt_dir):
         puck_final_pos = obs[:2] - np.array([1.51, 0.])
         dist_to_goal = np.linalg.norm(puck_final_pos - goal_pos)
 
-        if angle_offset not in prev_angle_offset:
+        if angle_offset not in prev_angle_offset and angle_offset not in {0.0, 3.141592653589788, 1.57}:
             prev_hit_angle.append(angle)
             prev_angle_offset.append(angle_offset)
             prev_puck_final_pos.append(puck_final_pos)
@@ -160,6 +161,7 @@ def main(port, prompt_dir):
 
         if dist_to_goal < 0.1:
             print("Goal! Start a new trial.")
+            break
         else:
 
             expr_results = ""
@@ -181,18 +183,29 @@ def main(port, prompt_dir):
                 {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': first_prompt},
             ]
-            chat_history.append({"role": "user", "content": continue_prompt})
-            answer = query_model(port=port, chat_history=chat_history)
-            try:
-                code_snippet = process_answer(answer)
-                print("Answer: ", answer)
-                class CodeSnippet:
-                    angle_offset = 0.
-                    exec(code_snippet)
-                angle_offset = CodeSnippet.angle_offset.value
-                print("Angle Offset: ", angle_offset)
-            except Exception as e:
-                pass
+            chat_history.append({"role": "user", "content": continue_prompt})            
+
+            got_angle = False
+            attempt = 0
+            max_attempts = 20
+            while not got_angle:
+                print("Attempt", attempt + 1)
+                answer = query_model(port=port, chat_history=chat_history)
+                try:
+                    code_snippet = process_answer(answer)
+                    print("Answer: ", answer)
+                    class CodeSnippet:
+                        angle_offset = 0.
+                        exec(code_snippet)
+                    angle_offset = CodeSnippet.angle_offset.value
+                    assert angle_offset not in prev_angle_offset
+                    print("Angle Offset: ", angle_offset)
+                    got_angle = True
+                except Exception as e:
+                    pass
+                attempt += 1
+                if attempt >= max_attempts:
+                    break
 
 if __name__ == '__main__':
     port = 8080
