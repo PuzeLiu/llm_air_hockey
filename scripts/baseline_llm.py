@@ -6,16 +6,12 @@ from openai import OpenAI
 from air_hockey_llm.environments.air_hockey_hit import IiwaPositionHit
 from air_hockey_llm.baseline_agent_instruct import BaselineAgent
 
-expr_result_line = """
-The following angle_offset resulted in a final distance to goal of {dist}.
-```python
-class angle_offset:
-  value: float = {offset}
-```
+expr_result_line = """The following angle_offset {offset:.4f} resulted in a final distance to goal of {dist:.4f}.
 
 """
 
 query_index = 0
+attempt = 0
 
 def query_model(port, chat_history, cat_chat_history=True):
 
@@ -24,7 +20,7 @@ def query_model(port, chat_history, cat_chat_history=True):
     api_key = "EMPTY"
     api_base = f"http://localhost:{port}/v1"
     client = OpenAI(api_key=api_key, base_url=api_base)
-    model = "deepseek-ai/deepseek-coder-6.7b-instruct"
+    model = "deepseek-ai/deepseek-coder-33b-instruct"
 
     if cat_chat_history:
 
@@ -37,7 +33,7 @@ def query_model(port, chat_history, cat_chat_history=True):
     else:
         chat_history_use = chat_history
 
-    with open(f'prompt{query_index}.txt', 'w') as fp:
+    with open(f'prompt_{query_index}_{attempt}.txt', 'w') as fp:
         fp.write(chat_history_use[0]['content'])
 
     completion = client.chat.completions.create(
@@ -49,7 +45,7 @@ def query_model(port, chat_history, cat_chat_history=True):
         temperature=0.6,
     )
 
-    with open(f'response{query_index}.txt', 'w') as fr:
+    with open(f'response_{query_index}_{attempt}.txt', 'w') as fr:
         fr.write(completion.choices[0].message.content)
 
     query_index += 1
@@ -78,6 +74,44 @@ def process_answer(answer):
         return eval(function_name)
 
 
+class AngleOffsetStepper:
+    def __init__(self):
+        self.offset = 0.
+        self.step_size = 0.1
+        self.options = ["LEFT", "RIGHT", "DOUBLE_LEFT", "DOUBLE_RIGHT", "HALF_LEFT", "HALF_RIGHT", "NONE"]
+        self.code_block_regex = re.compile(r"```python\n(.*?)\n```", re.DOTALL)
+
+    def process(self, answer):
+        code_blocks = self.code_block_regex.findall(answer)[0]
+
+        class CodeSnippet:
+            Action = None
+            exec(code_blocks)
+        
+        action = CodeSnippet.Action.value
+        if action == "LEFT":
+            self.offset -= self.step_size
+        elif action == "RIGHT":
+            self.offset += self.step_size
+        elif action == "DOUBLE_LEFT":
+            self.step_size *= 2
+            self.offset -= self.step_size
+        elif action == "DOUBLE_RIGHT":
+            self.step_size *= 2
+            self.offset += self.step_size
+        elif action == "HALF_LEFT":
+            self.step_size /= 2
+            self.offset -= self.step_size
+        elif action == "HALF_RIGHT":
+            self.step_size /= 2
+            self.offset += self.step_size
+        elif action == "NONE":
+            pass
+        else:
+            raise ValueError(f"Unknown action: {action}")
+        return action
+    
+
 def main(port, prompt_dir):
     viewer_params = {'camera_params': {'static': dict(distance=3.0, elevation=-45.0, azimuth=90.0,
                                                       lookat=(0., 0., 0.))},
@@ -86,8 +120,6 @@ def main(port, prompt_dir):
                      'hide_menu_on_startup': True}
 
     env = IiwaPositionHit(interpolation_order=-1, viewer_params=viewer_params, horizon=200)
-    # env.puck_init_pos = np.array([-0.5, 0.3])
-
     agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit', max_hit_velocity=1.0)
 
     jinja_env = jinja2.Environment(
@@ -114,7 +146,8 @@ def main(port, prompt_dir):
     prev_angle_offset = list()
     prev_puck_final_pos = list()
     prev_dist_to_goal = list()
-    angle_offset = 0.
+    
+    angle_offset = AngleOffsetStepper()
 
     for i in range(n_episodes):
         done = False
@@ -130,13 +163,13 @@ def main(port, prompt_dir):
 
         # angle, velocity_scale = compute_angle_and_velocity(puck_init_pos=puck_pos, puck_init_vel=puck_vel, goal_pos=goal_pos)
         diff = goal_pos - puck_pos
-        angle = np.arctan2(diff[1], diff[0])
+        # angle = np.arctan2(diff[1], diff[0])
         velocity_scale = 1.0
         # angle_offset = compute_angle_offset(angle, np.array(prev_hit_angle), np.array(prev_puck_final_pos), goal_pos)
-        angle += angle_offset
+        angle = angle_offset.offset
         agent.set_instruction({'hit_angle': angle, 'hit_velocity': velocity_scale})
 
-        print(f"Hit Angle: {angle}, Hit Velocity Scale: {velocity_scale}, Offset: {angle_offset}")
+        print(f"Hit Angle: {angle}, Hit Velocity Scale: {velocity_scale}, Offset: {angle_offset.offset}")
 
         n_steps = 0
         hit_puck_vel = 0.
@@ -155,15 +188,15 @@ def main(port, prompt_dir):
 
         if angle_offset not in prev_angle_offset and angle_offset not in {0.0, 3.141592653589788, 1.57}:
             prev_hit_angle.append(angle)
-            prev_angle_offset.append(angle_offset)
+            prev_angle_offset.append(angle_offset.offset)
             prev_puck_final_pos.append(puck_final_pos)
             prev_dist_to_goal.append(dist_to_goal)
 
-        if dist_to_goal < 0.1:
+        # if dist_to_goal < 0.1:
+        if False:
             print("Goal! Start a new trial.")
-            break
+            # break
         else:
-
             expr_results = ""
             for offset, dist in zip(prev_angle_offset, prev_dist_to_goal):
                 expr_results += expr_result_line.format(dist=dist, offset=offset)
@@ -171,14 +204,11 @@ def main(port, prompt_dir):
             continue_prompt = jinja_env.get_template("continue.jinja").render(
                 expr_results=expr_results,
                 goal_pos=goal_pos,
+                current_offset=angle_offset.offset,
+                step_size=angle_offset.step_size,
             )
-
-
-                # hit_angle=prev_hit_angle, angle_offset=prev_angle_offset, puck_final_position=prev_puck_final_pos, dist_to_goal=prev_dist_to_goal,
-                # goal_pos=goal_pos)
-
+            print(f"Puck final pos: {puck_final_pos}, Distance to goal: {dist_to_goal}")
             print("#########################################")
-            print("New prompt: ", continue_prompt)
             chat_history = [
                 {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': first_prompt},
@@ -186,24 +216,20 @@ def main(port, prompt_dir):
             chat_history.append({"role": "user", "content": continue_prompt})            
 
             got_angle = False
+
+            global attempt
             attempt = 0
             max_attempts = 20
             while not got_angle:
-                print("Attempt", attempt + 1)
+                attempt += 1
+                print("Attempt", attempt)
                 answer = query_model(port=port, chat_history=chat_history)
                 try:
-                    code_snippet = process_answer(answer)
-                    print("Answer: ", answer)
-                    class CodeSnippet:
-                        angle_offset = 0.
-                        exec(code_snippet)
-                    angle_offset = CodeSnippet.angle_offset.value
-                    assert angle_offset not in prev_angle_offset
-                    print("Angle Offset: ", angle_offset)
+                    action = angle_offset.process(answer)
+                    print("Angle Offset: ", angle_offset.offset, "Action: ", action)
                     got_angle = True
                 except Exception as e:
                     pass
-                attempt += 1
                 if attempt >= max_attempts:
                     break
 
