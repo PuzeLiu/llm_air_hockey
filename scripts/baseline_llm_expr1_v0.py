@@ -1,10 +1,16 @@
 import os
 import re
+import sys
+import json
 import jinja2
 import numpy as np
 from openai import OpenAI
+from copy import deepcopy
 from air_hockey_llm.environments.air_hockey_hit import IiwaPositionHit
 from air_hockey_llm.baseline_agent_instruct import BaselineAgent
+
+record_prompts = False
+record_response = False
 
 expr_result_line = """
 The following angle_offset resulted in a final distance to goal of {dist}.
@@ -37,8 +43,10 @@ def query_model(port, chat_history, cat_chat_history=True):
     else:
         chat_history_use = chat_history
 
-    with open(f'prompt{query_index}.txt', 'w') as fp:
-        fp.write(chat_history_use[0]['content'])
+
+    if record_prompts:
+        with open(f'prompt{query_index}.txt', 'w') as fp:
+            fp.write(chat_history_use[0]['content'])
 
     completion = client.chat.completions.create(
         model=model,
@@ -49,8 +57,9 @@ def query_model(port, chat_history, cat_chat_history=True):
         temperature=0.6,
     )
 
-    with open(f'response{query_index}.txt', 'w') as fr:
-        fr.write(completion.choices[0].message.content)
+    if record_response:
+        with open(f'response{query_index}.txt', 'w') as fr:
+            fr.write(completion.choices[0].message.content)
 
     query_index += 1
 
@@ -78,7 +87,7 @@ def process_answer(answer):
         return eval(function_name)
 
 
-def main(port, prompt_dir):
+def main(port, prompt_dir, expr_index, data_dir):
     viewer_params = {'camera_params': {'static': dict(distance=3.0, elevation=-45.0, azimuth=90.0,
                                                       lookat=(0., 0., 0.))},
                      'width': 1440, 'height': 810,
@@ -114,7 +123,10 @@ def main(port, prompt_dir):
     prev_angle_offset = list()
     prev_puck_final_pos = list()
     prev_dist_to_goal = list()
-    angle_offset = 0.
+    angle_offset = np.random.uniform(-0.5 * np.pi, 0.5 * np.pi) # 0.
+    best_dist_to_goal = []
+
+    data = {}
 
     for i in range(n_episodes):
         done = False
@@ -143,7 +155,7 @@ def main(port, prompt_dir):
         while n_steps < env.info.horizon:
             action = agent.draw_action(obs)
             obs, reward, done, info = env.step(action)
-            env.render()
+            # env.render()
             n_steps += 1
             if np.linalg.norm(hit_puck_vel) == 0. and obs[0] >= 1.51:
                 hit_puck_vel = obs[3:5]
@@ -153,6 +165,15 @@ def main(port, prompt_dir):
         puck_final_pos = obs[:2] - np.array([1.51, 0.])
         dist_to_goal = np.linalg.norm(puck_final_pos - goal_pos)
 
+        if len(best_dist_to_goal) > 0:
+            if dist_to_goal < best_dist_to_goal[-1]:
+                best_dist_to_goal.append(dist_to_goal)
+            else:
+                best_dist_to_goal.append(deepcopy(best_dist_to_goal[-1]))
+        else:
+            best_dist_to_goal.append(dist_to_goal)
+            
+
         if angle_offset not in prev_angle_offset and angle_offset not in {0.0, 3.141592653589788, 1.57}:
             prev_hit_angle.append(angle)
             prev_angle_offset.append(angle_offset)
@@ -161,6 +182,10 @@ def main(port, prompt_dir):
 
         if dist_to_goal < 0.1:
             print("Goal! Start a new trial.")
+            filename = os.path.join(data_dir, f"expr_{expr_index}.json")
+            data = {'best_dist_to_goal': best_dist_to_goal}
+            with open(filename, 'w') as f:
+                f.write(json.dumps(data))
             break
         else:
 
@@ -185,10 +210,10 @@ def main(port, prompt_dir):
             ]
             chat_history.append({"role": "user", "content": continue_prompt})            
 
-            got_angle = False
+            got_angle_offset = False
             attempt = 0
-            max_attempts = 20
-            while not got_angle:
+            max_attempts = 1000
+            while not got_angle_offset:
                 print("Attempt", attempt + 1)
                 answer = query_model(port=port, chat_history=chat_history)
                 try:
@@ -200,18 +225,22 @@ def main(port, prompt_dir):
                     angle_offset = CodeSnippet.angle_offset.value
                     assert angle_offset not in prev_angle_offset
                     print("Angle Offset: ", angle_offset)
-                    got_angle = True
+                    got_angle_offset = True
                 except Exception as e:
                     pass
                 attempt += 1
                 if attempt >= max_attempts:
                     break
 
+            
+
 if __name__ == '__main__':
     port = 8080
-    prompt_dir = "prompts/air_hockey"
+    prompt_dir = "../prompts/air_hockey"
+    expr_index = int(sys.argv[1])
+    data_dir = sys.argv[2]
     # answer = query_model(port=port, file_dir=prompt_file)
     # with open(f"answer_{port}.txt", "w") as f:
     #     f.write(answer)
 
-    main(port, prompt_dir)
+    main(port, prompt_dir, expr_index, data_dir)
