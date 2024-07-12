@@ -1,9 +1,9 @@
 import copy
 import numpy as np
+import torch
 import json
 import mujoco
 from enum import Enum
-from mushroom_rl.core import Agent
 import scipy
 import scipy.linalg
 from scipy import sparse
@@ -11,6 +11,9 @@ from scipy.interpolate import CubicSpline
 import nlopt
 import osqp
 import time
+from mushroom_rl.core.agent import Agent
+from air_hockey_challenge.environments.iiwas import AirHockeySingle
+from air_hockey_challenge.environments.position_control_wrapper import PositionControlIIWA
 
 
 ### kinematics.py ###
@@ -1954,24 +1957,6 @@ class SmashInstruct(Tactic):
 
 
 ### baseline_agent_instruct.py ### 
-def build_agent(env_info, **kwargs):
-    """
-    Function where an Agent that controls the environments should be returned.
-    The Agent should inherit from the mushroom_rl Agent base env.
-
-    :param env_info: The environment information
-    :return: Either Agent ot Policy
-    """
-    if "hit" in env_info["env_name"]:
-        return BaselineAgent(env_info, **kwargs, agent_id=1)
-    if "defend" in env_info["env_name"]:
-        return BaselineAgent(env_info, **kwargs, agent_id=1, only_tactic="defend")
-    if "prepare" in env_info["env_name"]:
-        return BaselineAgent(env_info, **kwargs, agent_id=1, only_tactic="prepare")
-
-    return BaselineAgent(env_info, **kwargs)
-
-
 class BaselineAgent(AgentBase):
     def __init__(self, env_info, agent_id=1, only_tactic=None, **kwargs):
         super(BaselineAgent, self).__init__(env_info, agent_id, **kwargs)
@@ -2018,9 +2003,25 @@ class BaselineAgent(AgentBase):
         return np.vstack([self.state.q_cmd, self.state.dq_cmd])
 
 
+def build_agent(env_info, **kwargs):
+    """
+    Function where an Agent that controls the environments should be returned.
+    The Agent should inherit from the mushroom_rl Agent base env.
+
+    :param env_info: The environment information
+    :return: Either Agent ot Policy
+    """
+    if "hit" in env_info["env_name"]:
+        return BaselineAgent(env_info, **kwargs, agent_id=1)
+    if "defend" in env_info["env_name"]:
+        return BaselineAgent(env_info, **kwargs, agent_id=1, only_tactic="defend")
+    if "prepare" in env_info["env_name"]:
+        return BaselineAgent(env_info, **kwargs, agent_id=1, only_tactic="prepare")
+
+    return BaselineAgent(env_info, **kwargs)
+
 ### environment/air_hockey_hit.py ### 
-from air_hockey_challenge.environments.iiwas import AirHockeySingle 
-from air_hockey_challenge.environments.position_control_wrapper import PositionControlIIWA
+
 
 class AirHockeyHit(AirHockeySingle):
     def __init__(self, gamma=0.99, horizon=500, viewer_params=..., **kwargs):
@@ -2128,8 +2129,8 @@ def main():
     for i in range(n_episodes):
         done = False
         
-        env.puck_init_pos = np.array([-0.5, -0.3])
-        env.puck_init_vel = np.array([0., 0.1])
+        env.puck_init_pos = np.random.rand(2) * (env.hit_range[:, 1] - env.hit_range[:, 0]) + env.hit_range[:, 0]
+        env.puck_init_vel = np.random.rand(2) * 0.2
         obs = env.reset()
         puck_pos = obs[:2] - np.array([1.51, 0.])
         puck_vel = obs[3:5]
