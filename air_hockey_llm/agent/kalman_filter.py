@@ -1,11 +1,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-# b_params = np.array([8.40683102e-01, 1.42380669e-01, 7.71445220e-04])
-b_params = np.array([8.40683102e-01, 0, 7.71445220e-04])
-n_params = np.array([0., -0.79, 0.])
-theta_params = np.array([-6.48073315, 6.32545305, 0.8386719])
-damping = np.array([0.2125, 0.2562])
+B_PARAMS = np.array([8.40683102e-01, 0, 7.71445220e-04])
+N_PARAMS = np.array([0., -0.79, 0.])
+THETA_PARAMS = np.array([-6.48073315, 6.32545305, 0.8386719])
+DAMPING = np.array([0.2125, 0.2562])
 LIN_COV = np.diag([8.90797655e-07, 5.49874493e-07, 2.54163138e-04, 3.80228296e-04, 7.19007035e-02, 1.58019149e+00])
 COL_COV = \
     np.array([[0., 0., 0., 0., 0., 0.],
@@ -30,8 +29,8 @@ class SystemModel:
         self.F = np.eye(6)
         self.F_linear = np.eye(6)
         self.F_linear[0, 2] = self.F_linear[1, 3] = self.F_linear[4, 5] = self.dt
-        self.F_linear[2, 2] = 1 - self.dt * damping[0]
-        self.F_linear[3, 3] = 1 - self.dt * damping[1]
+        self.F_linear[2, 2] = 1 - self.dt * DAMPING[0]
+        self.F_linear[3, 3] = 1 - self.dt * DAMPING[1]
         self.Q_collision = np.zeros((6, 6))
         self.has_collision = False
         self.outside_boundary = False
@@ -63,7 +62,6 @@ class AirHockeyTable:
         self.puck_radius = puck_radius
         self.x_offset = x_offset
         self.dt = dt
-        self.col_cov = COL_COV
 
         pos_offset = np.array([x_offset, 0])
         p1 = np.array([-length / 2 + puck_radius, -width / 2 + puck_radius]) + pos_offset
@@ -102,9 +100,9 @@ class AirHockeyTable:
         self._F_precollision = np.eye(6)
         self._F_postcollision = np.eye(6)
         self._jac_local_collision = np.eye(6)
-        self._jac_local_collision[2, [2, 3, 5]] = b_params[0:3]
-        self._jac_local_collision[3, [2, 3, 5]] = n_params[0:3]
-        self._jac_local_collision[5, [2, 3, 5]] = theta_params[0:3]
+        self._jac_local_collision[2, [2, 3, 5]] = B_PARAMS[0:3]
+        self._jac_local_collision[3, [2, 3, 5]] = N_PARAMS[0:3]
+        self._jac_local_collision[5, [2, 3, 5]] = THETA_PARAMS[0:3]
 
     def check_collision(self, state):
         score = False
@@ -158,7 +156,7 @@ class AirHockeyTable:
 
             F_collision = self.local_rim_transform_inv[collide_rim_idx] @ jac_local_collision @ self.local_rim_transform[collide_rim_idx]
             F = self._F_postcollision @ F_collision @ self._F_precollision
-            Q_collision = self.local_rim_transform_inv[collide_rim_idx] @ self.col_cov @ self.local_rim_transform_inv[collide_rim_idx].T
+            Q_collision = self.local_rim_transform_inv[collide_rim_idx] @ COL_COV @ self.local_rim_transform_inv[collide_rim_idx].T
         return F, Q_collision, collision
 
 

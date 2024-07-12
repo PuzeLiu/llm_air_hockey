@@ -1,7 +1,6 @@
 import numpy as np
 
 from .agent_base import AgentBase
-# from baseline.baseline_agent.tactics import *
 from .tactic_smash_instruct import SmashInstruct
 from .agent_params import AgentParams
 from .system_state import SystemState
