@@ -4,7 +4,7 @@ import jinja2
 import numpy as np
 from openai import OpenAI
 from air_hockey_llm.environments.air_hockey_hit import IiwaPositionHit
-from air_hockey_llm.baseline_agent_instruct import BaselineAgent
+from air_hockey_llm.agent.baseline_agent_instruct import BaselineAgent
 
 expr_result_line = """The following angle_offset {offset:.4f} resulted in a final distance to goal of {dist:.4f}.
 

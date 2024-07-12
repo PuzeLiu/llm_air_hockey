@@ -1,8 +1,12 @@
 import numpy as np
 
-from air_hockey_challenge.framework.agent_base import AgentBase
-from baseline.baseline_agent.tactics import *
+from .agent_base import AgentBase
+# from baseline.baseline_agent.tactics import *
 from .tactic_smash_instruct import SmashInstruct
+from .agent_params import AgentParams
+from .system_state import SystemState
+from .trajectory_generator import TrajectoryGenerator
+from .tactics import Init, Ready, Prepare, Defend, Repel, TACTICS
 
 
 def build_agent(env_info, **kwargs):
@@ -27,31 +31,7 @@ class BaselineAgent(AgentBase):
     def __init__(self, env_info, agent_id=1, only_tactic=None, **kwargs):
         super(BaselineAgent, self).__init__(env_info, agent_id, **kwargs)
 
-        if self.env_info['robot']['n_joints'] == 3:
-            joint_anchor_pos = np.array([-1.15570723, 1.30024401, 1.44280414])
-            x_init = np.array([0.65, 0., 0.1])
-            x_home = np.array([0.65, 0., 0.1])
-            max_hit_velocity = 1.0
-        else:
-            joint_anchor_pos = np.array([0., -0.1961, 0., -1.8436, 0., 0.9704, 0.])
-            x_init = np.array([0.65, 0., self.env_info['robot']['ee_desired_height'] + 0.2])
-            x_home = np.array([0.65, 0., self.env_info['robot']['ee_desired_height']])
-            max_hit_velocity = 1.2
-
-        self.agent_params = {'switch_tactics_min_steps': 15,
-                             'max_prediction_time': 1.0,
-                             'max_plan_steps': 5,
-                             'static_vel_threshold': 0.4,
-                             'transversal_vel_threshold': 0.1,
-                             'joint_anchor_pos': joint_anchor_pos,
-                             'default_linear_vel': 0.6,
-                             'x_init': x_init,
-                             'x_home': x_home,
-                             'hit_range': [0.8, 1.3],
-                             'max_hit_velocity': max_hit_velocity,
-                             'defend_range': [0.8, 1.0],
-                             'defend_width': 0.45,
-                             'prepare_range': [0.8, 1.3]}
+        self.agent_params = AgentParams(env_info)
 
         self.state = SystemState(self.env_info, agent_id, self.agent_params)
         self.traj_generator = TrajectoryGenerator(self.env_info, self.agent_params, self.state)
