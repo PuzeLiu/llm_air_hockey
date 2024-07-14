@@ -1397,6 +1397,9 @@ class TrajectoryOptimizer:
         jac = jacobian(self.robot_model, self.robot_data, q_cur)[:3, : self.n_joints]
         N_J = scipy.linalg.null_space(jac)
         b = np.linalg.lstsq(jac, (x_des - x_cur) / self.env_info["dt"], rcond=None)[0]
+        
+        scale_factor = np.maximum(np.max(np.abs(b) / (self.env_info["robot"]["joint_vel_limit"][1] * 0.9 * 0.99)), 1)
+        b /= scale_factor
 
         P = (N_J.T @ np.diag(self.anchor_weights) @ N_J) / 2
         q = (b - dq_anchor).T @ np.diag(self.anchor_weights) @ N_J
@@ -1634,7 +1637,7 @@ class TrajectoryGenerator:
 
     def optimize_trajectory(self, cart_traj, q_start, dq_start, q_anchor):
         success, joint_pos_traj = self.optimizer.optimize_trajectory(cart_traj, q_start, dq_start, q_anchor)
-        if len(joint_pos_traj) > 1:
+        if len(joint_pos_traj) >= 1:
             t = np.linspace(0, joint_pos_traj.shape[0], joint_pos_traj.shape[0] + 1) * 0.02
             f = CubicSpline(
                 t, np.vstack([q_start, joint_pos_traj]), axis=0, bc_type=((1, dq_start), (2, np.zeros_like(dq_start)))
