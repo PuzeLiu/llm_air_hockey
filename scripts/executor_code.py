@@ -1905,7 +1905,7 @@ class Prepare(Tactic):
         else:
             self.switch_count = 0
 
-        if (self.switch_count > 4 or self.state.tactic_finish) and len(self.state.trajectory_buffer) == 0:
+        if (self.switch_count >= agent_params.max_plan_steps or self.state.tactic_finish) and len(self.state.trajectory_buffer) == 0:
             self._set_tactic(TACTICS.READY)
 
     def ready(self):
@@ -1994,7 +1994,7 @@ class Defend(Tactic):
         else:
             self.switch_count = 0
 
-        if (self.switch_count > 4 or self.state.tactic_finish) and len(self.state.trajectory_buffer) == 0:
+        if (self.switch_count >= agent_params.max_plan_steps or self.state.tactic_finish) and len(self.state.trajectory_buffer) == 0:
             self._set_tactic(TACTICS.READY)
 
     def ready(self):
@@ -2096,7 +2096,7 @@ class Smash(Tactic):
         else:
             self.switch_count = 0
 
-        if self.switch_count > 4 and len(self.state.trajectory_buffer) == 0:
+        if self.switch_count >= agent_params.max_plan_steps and len(self.state.trajectory_buffer) == 0:
             self._set_tactic(TACTICS.READY)
 
     def ready(self):
@@ -2194,7 +2194,7 @@ class SmashInstruct(Tactic):
         else:
             self.switch_count = 0
 
-        if len(self.state.trajectory_buffer) == 0:
+        if self.switch_count >= agent_params.max_plan_steps and len(self.state.trajectory_buffer) == 0:
             self._set_tactic(TACTICS.READY)
 
     def set_instruction(self, instructions):
@@ -2348,7 +2348,7 @@ class BaselineAgent(AgentBase):
         self.state.update_observation(self.get_joint_pos(obs), self.get_joint_vel(obs), self.get_puck_pos(obs))
 
         it = 0
-        maxit = agent_params.switch_tactics_min_steps + 1
+        maxit = agent_params.switch_tactics_min_steps + agent_params.max_plan_steps
 
         while True:
             if it >= maxit:
@@ -2408,7 +2408,7 @@ def main():
 
     agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit', max_hit_velocity=1.0)
 
-    n_episodes = 200 # 500
+    n_episodes = 250 # 500
     env.reset()
 
     return_history = []
