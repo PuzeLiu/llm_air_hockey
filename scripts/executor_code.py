@@ -604,10 +604,10 @@ class AgentParams:
         static_vel_threshold: float = 0.4,
         transversal_vel_threshold: float = 0.1,
         default_linear_vel: float = 0.6,
-        hit_range_low: float = 0.8,
-        hit_range_high: float = 1.3,
-        defend_range_low: float = 0.8,
-        defend_range_high: float = 1.0,
+        hit_range_low: float = 0.8, # the variable hit_range_low should NOT be modified
+        hit_range_high: float = 1.3,  # the variable hit_range_high should NOT be modified
+        defend_range_low: float = 0.8, # the variable defend_range_high should NOT be modified
+        defend_range_high: float = 1.3, # the variable defend_range_high should NOT be modified
         defend_width: float = 0.45,
         prepare_width_low: float = 0.8,
         prepare_width_high: float = 1.3,
@@ -676,7 +676,7 @@ class AgentParams:
         return self._joint_anchor_pos
 
 
-agent_params = AgentParams(switch_tactics_min_steps=15,max_prediction_time=1.0,max_plan_steps=5,static_vel_threshold=0.4,transversal_vel_threshold=0.1,default_linear_vel=0.6,hit_range_low=0.8,hit_range_high=1.3,defend_range_low=0.8,defend_range_high=1.0,defend_width=0.45,prepare_width_low=0.8,prepare_width_high=1.3,static_count_threshold=3,puck_approaching_count_threshold=3,puck_transversal_moving_count_threshold=3)
+agent_params = AgentParams(switch_tactics_min_steps=15,max_prediction_time=1.0,max_plan_steps=5,static_vel_threshold=0.4,transversal_vel_threshold=0.1,default_linear_vel=0.6,defend_width=0.45,prepare_width_low=0.8,prepare_width_high=1.3,static_count_threshold=3,puck_approaching_count_threshold=3,puck_transversal_moving_count_threshold=3)
 
 
 # @MODEL_END@
@@ -2406,9 +2406,9 @@ def compute_angle_and_velocity(puck_init_pos, puck_init_vel, goal_pos):
 def main():
     print("Starting main")
 
-    agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic=None, max_hit_velocity=1.0)
+    agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit', max_hit_velocity=1.0)
 
-    n_episodes = 500
+    n_episodes = 200 # 500
     env.reset()
 
     return_history = []
