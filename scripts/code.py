@@ -631,6 +631,12 @@ class AgentParams:
         self.static_count_threshold: int = static_count_threshold
         self.puck_approaching_count_threshold: int = puck_approaching_count_threshold
         self.puck_transversal_moving_count_threshold: int = puck_transversal_moving_count_threshold
+        self.hit_range_low = hit_range_low
+        self.hit_range_high = hit_range_high
+        self.defend_range_low = defend_range_low
+        self.defend_range_high = defend_range_high
+        self.prepare_width_low = prepare_width_low
+        self.prepare_width_high = prepare_width_high
 
     @cached_property
     def hit_range(self):
