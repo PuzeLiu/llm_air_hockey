@@ -1,19 +1,126 @@
+import sys
 import copy
 import numpy as np
 import torch
+import traceback
+
+from functools import cached_property
+
 import json
+
 import mujoco
+
 from enum import Enum
 import scipy
 import scipy.linalg
 from scipy import sparse
+
 from scipy.interpolate import CubicSpline
+
 import nlopt
+
 import osqp
+
 import time
+
 from mushroom_rl.core.agent import Agent
+
 from air_hockey_challenge.environments.iiwas import AirHockeySingle
 from air_hockey_challenge.environments.position_control_wrapper import PositionControlIIWA
+
+
+class PlanningException(Exception):
+    def __init__(self):
+        super().__init__("planning failed")
+
+
+class AirHockeyHit(AirHockeySingle):
+    def __init__(self, gamma=0.99, horizon=500, viewer_params=..., **kwargs):
+        super().__init__(gamma, horizon, viewer_params, **kwargs)
+        self.puck_init_pos = np.array([-0.71, 0.0])
+        self.puck_init_vel = np.array([0.0, 0.0])
+        self.hit_range = np.array([[-0.65, -0.25], [-0.4, 0.4]])  # Table Frame
+
+    def setup(self, obs):
+        # Initial position of the puck
+        # puck_pos = np.random.rand(2) * (self.hit_range[:, 1] - self.hit_range[:, 0]) + self.hit_range[:, 0]
+        puck_pos = self.puck_init_pos
+
+        self._write_data("puck_x_pos", puck_pos[0])
+        self._write_data("puck_y_pos", puck_pos[1])
+
+        self._write_data("puck_x_vel", self.puck_init_vel[0])
+        self._write_data("puck_y_vel", self.puck_init_vel[1])
+
+        # if self.moving_init:
+        #     lin_vel = np.random.uniform(self.init_velocity_range[0], self.init_velocity_range[1])
+        #     angle = np.random.uniform(-np.pi / 2 - 0.1, np.pi / 2 + 0.1)
+        #     puck_vel = np.zeros(3)
+        #     puck_vel[0] = -np.cos(angle) * lin_vel
+        #     puck_vel[1] = np.sin(angle) * lin_vel
+        #     puck_vel[2] = np.random.uniform(-2, 2, 1)
+
+        #     self._write_data("puck_x_vel", puck_vel[0])
+        #     self._write_data("puck_y_vel", puck_vel[1])
+        #     self._write_data("puck_yaw_vel", puck_vel[2])
+
+        super().setup(obs)
+
+    def reward(self, obs, action, next_obs, absorbing):
+        return 0
+
+    def is_absorbing(self, obs):
+        puck_pos, puck_vel = self.get_puck(obs)
+        # Stop if the puck bounces back on the opponents wall
+        if puck_pos[0] > 0 and puck_vel[0] < 0:
+            return True
+        return super(AirHockeyHit, self).is_absorbing(obs)
+
+
+class IiwaPositionHit(PositionControlIIWA, AirHockeyHit):
+    def __init__(self, interpolation_order, opponent_agent=None, opponent_interp_order=-1, *args, **kwargs):
+        super().__init__(interpolation_order=interpolation_order, *args, **kwargs)
+
+        # Use default agent when none is provided
+        if opponent_agent is None:
+            self._opponent_agent_gen = self._default_opponent_action_gen()
+            self._opponent_agent = lambda obs: next(self._opponent_agent_gen)
+
+    def setup(self, obs):
+        super().setup(obs)
+        self._opponent_agent_gen = self._default_opponent_action_gen()
+
+    def _default_opponent_action_gen(self):
+        vel = 3
+        t = np.pi / 2
+        cart_offset = np.array([0.65, 0])
+        prev_joint_pos = self.init_state
+
+        it = 0
+        maxit = 5
+
+        while True:
+            if it >= maxit:
+                raise PlanningException()
+
+            it += 1
+
+            t += vel * self.dt
+            cart_pos = np.array([0.1, 0.16]) * np.array([np.sin(t) * np.cos(t), np.cos(t)]) + cart_offset
+
+            success, joint_pos = inverse_kinematics(
+                self.env_info["robot"]["robot_model"],
+                self.env_info["robot"]["robot_data"],
+                np.concatenate([cart_pos, [0.1 + self.env_info["robot"]["universal_height"]]]),
+                initial_q=prev_joint_pos,
+            )
+            assert success
+
+            joint_vel = (joint_pos - prev_joint_pos) / self.dt
+
+            prev_joint_pos = joint_pos
+
+            yield np.vstack([joint_pos, joint_vel])
 
 
 ### kinematics.py ###
@@ -89,7 +196,7 @@ def inverse_kinematics(mj_model, mj_data, desired_position, desired_rotation=Non
     if initial_q is None:
         q_init = mj_data.qpos
     else:
-        q_init[:initial_q.size] = initial_q
+        q_init[: initial_q.size] = initial_q
 
     q_l = mj_model.jnt_range[:, 0]
     q_h = mj_model.jnt_range[:, 1]
@@ -101,8 +208,16 @@ def inverse_kinematics(mj_model, mj_data, desired_position, desired_rotation=Non
         desired_quat = np.zeros(4)
         mujoco.mju_mat2Quat(desired_quat, desired_rotation.reshape(-1, 1))
 
-    return _mujoco_clik(desired_position, desired_quat, q_init, link_to_xml_name(mj_model, link), mj_model,
-                        mj_data, lower_limit, upper_limit)
+    return _mujoco_clik(
+        desired_position,
+        desired_quat,
+        q_init,
+        link_to_xml_name(mj_model, link),
+        mj_model,
+        mj_data,
+        lower_limit,
+        upper_limit,
+    )
 
 
 def jacobian(mj_model, mj_data, q, link="ee"):
@@ -141,7 +256,7 @@ def jacobian(mj_model, mj_data, q, link="ee"):
 
 def link_to_xml_name(mj_model, link):
     try:
-        mj_model.body('iiwa_1/base')
+        mj_model.body("iiwa_1/base")
         link_to_frame_idx = {
             "1": "iiwa_1/link_1",
             "2": "iiwa_1/link_2",
@@ -163,13 +278,13 @@ def link_to_xml_name(mj_model, link):
 
 
 def _mujoco_fk(q, name, model, data):
-    data.qpos[:len(q)] = q
+    data.qpos[: len(q)] = q
     mujoco.mj_fwdPosition(model, data)
     return data.body(name).xpos.copy(), data.body(name).xmat.reshape(3, 3).copy()
 
 
 def _mujoco_jac(q, name, model, data):
-    data.qpos[:len(q)] = q
+    data.qpos[: len(q)] = q
     dtype = data.qpos.dtype
     jac = np.empty((6, model.nv), dtype=dtype)
     jac_pos, jac_rot = jac[:3], jac[3:]
@@ -278,17 +393,17 @@ class AgentBase(Agent):
                 A dictionary contains agent related information.
 
         """
-        super().__init__(env_info['rl_info'], None)
+        super().__init__(env_info["rl_info"], None)
         self.env_info = env_info
         self.agent_id = agent_id
-        self.robot_model = copy.deepcopy(env_info['robot']['robot_model'])
-        self.robot_data = copy.deepcopy(env_info['robot']['robot_data'])
+        self.robot_model = copy.deepcopy(env_info["robot"]["robot_model"])
+        self.robot_data = copy.deepcopy(env_info["robot"]["robot_data"])
 
         self._add_save_attr(
-            env_info='none',
-            agent_id='none',
-            robot_model='none',
-            robot_data='none',
+            env_info="none",
+            agent_id="none",
+            robot_model="none",
+            robot_data="none",
         )
 
     def reset(self):
@@ -302,7 +417,7 @@ class AgentBase(Agent):
         raise NotImplementedError
 
     def draw_action(self, observation):
-        """ Draw an action, i.e., desired joint position and velocity, at every time step.
+        """Draw an action, i.e., desired joint position and velocity, at every time step.
 
         Args:
             observation (ndarray): Observed state including puck's position/velocity, joint position/velocity,
@@ -323,7 +438,7 @@ class AgentBase(Agent):
 
     @classmethod
     def load_agent(cls, path, env_info, agent_id=1):
-        """ Load the Agent
+        """Load the Agent
 
         Args:
             path (Path, str): Path to the object
@@ -338,8 +453,8 @@ class AgentBase(Agent):
 
         agent.env_info = env_info
         agent.agent_id = agent_id
-        agent.robot_model = copy.deepcopy(env_info['robot']['robot_model'])
-        agent.robot_data = copy.deepcopy(env_info['robot']['robot_data'])
+        agent.robot_model = copy.deepcopy(env_info["robot"]["robot_model"])
+        agent.robot_data = copy.deepcopy(env_info["robot"]["robot_data"])
         return agent
 
     def get_puck_state(self, obs):
@@ -395,7 +510,7 @@ class AgentBase(Agent):
             Puck's position of the robot
 
         """
-        return obs[self.env_info['puck_pos_ids']]
+        return obs[self.env_info["puck_pos_ids"]]
 
     def get_puck_vel(self, obs):
         """
@@ -412,7 +527,7 @@ class AgentBase(Agent):
             Puck's velocity of the robot
 
         """
-        return obs[self.env_info['puck_vel_ids']]
+        return obs[self.env_info["puck_vel_ids"]]
 
     def get_joint_pos(self, obs):
         """
@@ -429,7 +544,7 @@ class AgentBase(Agent):
             joint position of the robot
 
         """
-        return obs[self.env_info['joint_pos_ids']]
+        return obs[self.env_info["joint_pos_ids"]]
 
     def get_joint_vel(self, obs):
         """
@@ -446,7 +561,7 @@ class AgentBase(Agent):
             joint velocity of the robot
 
         """
-        return obs[self.env_info['joint_vel_ids']]
+        return obs[self.env_info["joint_vel_ids"]]
 
     def get_ee_pose(self, obs):
         """
@@ -466,39 +581,77 @@ class AgentBase(Agent):
         return forward_kinematics(self.robot_model, self.robot_data, self.get_joint_pos(obs))
 
 
+viewer_params = {
+    "camera_params": {"static": dict(distance=3.0, elevation=-45.0, azimuth=90.0, lookat=(0.0, 0.0, 0.0))},
+    "width": 1440,
+    "height": 810,
+    "default_camera_mode": "static",
+    "hide_menu_on_startup": True,
+}
+
+env = IiwaPositionHit(interpolation_order=-1, viewer_params=viewer_params, horizon=200)
+
+
+# @MODEL_START@
+
+
 class AgentParams:
-    def __init__(self, env_info) -> None:
-
-        self._x_init = np.array([0.65, 0., env_info['robot']['ee_desired_height'] + 0.2])
-        self._x_home = np.array([0.65, 0., env_info['robot']['ee_desired_height']])
+    def __init__(
+        self,
+        switch_tactics_min_steps: int = 15,
+        max_prediction_time: float = 1.0,
+        max_plan_steps: int = 5,
+        static_vel_threshold: float = 0.4,
+        transversal_vel_threshold: float = 0.1,
+        default_linear_vel: float = 0.6,
+        hit_range_low: float = 0.8,
+        hit_range_high: float = 1.3,
+        defend_range_low: float = 0.8,
+        defend_range_high: float = 1.0,
+        defend_width: float = 0.45,
+        prepare_width_low: float = 0.8,
+        prepare_width_high: float = 1.3,
+        static_count_threshold: int = 3,
+        puck_approaching_count_threshold: int = 3,
+        puck_transversal_moving_count_threshold: int = 3,
+    ) -> None:
+        env_info = env.env_info
+        self._x_init = np.array([0.65, 0.0, env_info["robot"]["ee_desired_height"] + 0.2])
+        self._x_home = np.array([0.65, 0.0, env_info["robot"]["ee_desired_height"]])
         self._max_hit_velocity = 1.2
-        self._joint_anchor_pos = np.array([0., -0.1961, 0., -1.8436, 0., 0.9704, 0.])
+        self._joint_anchor_pos = np.array([0.0, -0.1961, 0.0, -1.8436, 0.0, 0.9704, 0.0])
 
-        self.switch_tactics_min_steps: int = 15
-        self.max_prediction_time: float = 1.0
-        self.max_plan_steps: int = 5
-        self.static_vel_threshold: float = 0.4
-        self.transversal_vel_threshold: float = 0.1
-        self.default_linear_vel: float = 0.6
-        self.hit_range: np.ndarray = np.array([0.8, 1.3])
-        self.defend_range: np.ndarray = np.array([0.8, 1.0])
-        self.defend_width: np.ndarray = np.array(0.45)
-        self.prepare_range: np.ndarray = np.array([0.8, 1.3])
-        self.static_count_threshold: int = 3
-        self.puck_approaching_count_threshold: int = 3
-        self.puck_transversal_moving_count_threshold: int = 3
+        self.defend_width = defend_width
+        self.switch_tactics_min_steps: int = switch_tactics_min_steps
+        self.max_prediction_time: float = max_prediction_time
+        self.max_plan_steps: int = max_plan_steps
+        self.static_vel_threshold: float = static_vel_threshold
+        self.transversal_vel_threshold: float = transversal_vel_threshold
+        self.default_linear_vel: float = default_linear_vel
+        self.static_count_threshold: int = static_count_threshold
+        self.puck_approaching_count_threshold: int = puck_approaching_count_threshold
+        self.puck_transversal_moving_count_threshold: int = puck_transversal_moving_count_threshold
+
+    @cached_property
+    def hit_range(self):
+        return np.array([self.hit_range_low, self.hit_range_high])
+
+    @cached_property
+    def defend_range(self):
+        return np.array([self.defend_range_low, self.defend_range_high])
+
+    @cached_property
+    def prepare_range(self):
+        return np.array([self.prepare_width_low, self.prepare_width_high])
 
     def parse_json(self, json_file):
         with open(json_file) as f:
             data = json.load(f)
 
         for key, value in data.items():
-            if hasattr(self, key):
-                # If the attribute exists and is an ndarray, convert the value to an ndarray
-                if isinstance(getattr(self, key), np.ndarray):
-                    setattr(self, key, np.array(value))
-            else:
-                setattr(self, key, value)
+            param_name = key.replace("agentparams_", "")
+            if hasattr(self, param_name):
+                setattr(self, param_name, value)
 
     @property
     def x_init(self):
@@ -517,32 +670,52 @@ class AgentParams:
         return self._joint_anchor_pos
 
 
+agent_params = AgentParams(switch_tactics_min_steps=15,max_prediction_time=1.0,max_plan_steps=5,static_vel_threshold=0.4,transversal_vel_threshold=0.1,default_linear_vel=0.6,hit_range_low=0.8,hit_range_high=1.3,defend_range_low=0.8,defend_range_high=1.0,defend_width=0.45,prepare_width_low=0.8,prepare_width_high=1.3,static_count_threshold=3,puck_approaching_count_threshold=3,puck_transversal_moving_count_threshold=3)
+
+
+# @MODEL_END@
+
+try:
+    params_path = sys.argv[1]
+    # user provided parameter file - load these
+    agent_params.parse_json(params_path)
+except:
+    pass
+
 ### kalman_filter.py ###
 B_PARAMS = np.array([8.40683102e-01, 0, 7.71445220e-04])
-N_PARAMS = np.array([0., -0.79, 0.])
+N_PARAMS = np.array([0.0, -0.79, 0.0])
 THETA_PARAMS = np.array([-6.48073315, 6.32545305, 0.8386719])
 DAMPING = np.array([0.2125, 0.2562])
-LIN_COV = np.diag([8.90797655e-07, 5.49874493e-07, 2.54163138e-04, 3.80228296e-04, 7.19007035e-02, 1.58019149e+00])
-COL_COV = \
-    np.array([[0., 0., 0., 0., 0., 0.],
-              [0., 0., 0., 0., 0., 0.],
-              [0., 0., 2.09562546e-01, 3.46276805e-02, 0., -1.03489604e+00],
-              [0., 0., 3.46276805e-02, 9.41218351e-02, 0., -1.67029496e+00],
-              [0., 0., 0., 0., 0., 0.],
-              [0., 0., -1.03489604e+00, -1.67029496e+00, 0., 1.78037877e+02]])
+LIN_COV = np.diag([8.90797655e-07, 5.49874493e-07, 2.54163138e-04, 3.80228296e-04, 7.19007035e-02, 1.58019149e00])
+COL_COV = np.array(
+    [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 2.09562546e-01, 3.46276805e-02, 0.0, -1.03489604e00],
+        [0.0, 0.0, 3.46276805e-02, 9.41218351e-02, 0.0, -1.67029496e00],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, -1.03489604e00, -1.67029496e00, 0.0, 1.78037877e02],
+    ]
+)
 
 OBS_COV = np.diag([5.0650402e-07, 8.3995428e-07, 1.6572967e-03])
 
 
 class SystemModel:
     def __init__(self, env_info, agent_id):
-        self.puck_radius = env_info['puck']['radius']
-        self.mallet_radius = env_info['mallet']['radius']
-        self.dt = env_info['dt']
+        self.puck_radius = env_info["puck"]["radius"]
+        self.mallet_radius = env_info["mallet"]["radius"]
+        self.dt = env_info["dt"]
 
-        self.table = AirHockeyTable(env_info['table']['length'], env_info['table']['width'],
-                                    env_info['table']['goal_width'], env_info['puck']['radius'],
-                                    abs(env_info['robot']['base_frame'][agent_id - 1][0, 3]), env_info['dt'])
+        self.table = AirHockeyTable(
+            env_info["table"]["length"],
+            env_info["table"]["width"],
+            env_info["table"]["goal_width"],
+            env_info["puck"]["radius"],
+            abs(env_info["robot"]["base_frame"][agent_id - 1][0, 3]),
+            env_info["dt"],
+        )
         self.F = np.eye(6)
         self.F_linear = np.eye(6)
         self.F_linear[0, 2] = self.F_linear[1, 3] = self.F_linear[4, 5] = self.dt
@@ -586,10 +759,7 @@ class AirHockeyTable:
         p3 = np.array([length / 2 - puck_radius, width / 2 - puck_radius]) + pos_offset
         p4 = np.array([-length / 2 + puck_radius, width / 2 - puck_radius]) + pos_offset
 
-        self.boundary = np.array([[p1, p2],
-                                  [p2, p3],
-                                  [p3, p4],
-                                  [p4, p1]])
+        self.boundary = np.array([[p1, p2], [p2, p3], [p3, p4], [p4, p1]])
 
         self.local_rim_transform = np.zeros((4, 6, 6))
         self.local_rim_transform_inv = np.zeros((4, 6, 6))
@@ -652,8 +822,9 @@ class AirHockeyTable:
         denominator = self._cross_2d(v, u)
         s = self._cross_2d(v, w) / (denominator + 1e-6)
         r = self._cross_2d(u, w) / (denominator + 1e-6)
-        collide_idx = np.where(np.logical_and(np.logical_and(1e-6 < s, s < 1 - 1e-6),
-                               np.logical_and(1e-6 < r, r < 1 - 1e-6)))[0]
+        collide_idx = np.where(
+            np.logical_and(np.logical_and(1e-6 < s, s < 1 - 1e-6), np.logical_and(1e-6 < r, r < 1 - 1e-6))
+        )[0]
         collision = False
 
         if len(collide_idx) > 0:
@@ -662,7 +833,8 @@ class AirHockeyTable:
             s_i = s[collide_rim_idx]
             self._F_precollision[0][2] = self._F_precollision[1][3] = self._F_precollision[4][5] = s_i * self.dt
             self._F_postcollision[0][2] = self._F_postcollision[1][3] = self._F_postcollision[4][5] = (
-                1 - s_i) * self.dt
+                1 - s_i
+            ) * self.dt
             state_local = self.local_rim_transform[collide_rim_idx] @ state
             # Compute the slide direction
             slide_dir = 1 if state_local[2] + state_local[5] * self.puck_radius >= 0 else -1
@@ -671,9 +843,17 @@ class AirHockeyTable:
             jac_local_collision[2, 3] *= slide_dir
             jac_local_collision[5, 3] *= slide_dir
 
-            F_collision = self.local_rim_transform_inv[collide_rim_idx] @ jac_local_collision @ self.local_rim_transform[collide_rim_idx]
+            F_collision = (
+                self.local_rim_transform_inv[collide_rim_idx]
+                @ jac_local_collision
+                @ self.local_rim_transform[collide_rim_idx]
+            )
             F = self._F_postcollision @ F_collision @ self._F_precollision
-            Q_collision = self.local_rim_transform_inv[collide_rim_idx] @ COL_COV @ self.local_rim_transform_inv[collide_rim_idx].T
+            Q_collision = (
+                self.local_rim_transform_inv[collide_rim_idx]
+                @ COL_COV
+                @ self.local_rim_transform_inv[collide_rim_idx].T
+            )
         return F, Q_collision, collision
 
 
@@ -720,7 +900,7 @@ class PuckTracker:
         # self.state = self.predicted_state
         self.state, self.P = self.update(measurement, predicted_state, P)
 
-    def get_prediction(self, t, defend_line=0.):
+    def get_prediction(self, t, defend_line=0.0):
         P_current = self.P.copy()
         state_current = self.state.copy()
         predict_time = 0
@@ -751,21 +931,21 @@ class TACTICS(Enum):
 
 
 class SystemState:
-    def __init__(self, env_info, agent_id, agent_params: AgentParams):
+    def __init__(self, env_info, agent_id):  # , agent_params: AgentParams):
         self.env_info = env_info
         self.agent_id = agent_id
         self.agent_params = agent_params
         self.puck_tracker = PuckTracker(self.env_info, agent_id)
-        self.robot_model = copy.deepcopy(self.env_info['robot']['robot_model'])
-        self.robot_data = copy.deepcopy(self.env_info['robot']['robot_data'])
+        self.robot_model = copy.deepcopy(self.env_info["robot"]["robot_model"])
+        self.robot_data = copy.deepcopy(self.env_info["robot"]["robot_data"])
 
         self.restart = True
 
-        self.q_cmd = np.zeros(self.env_info['robot']['n_joints'])
-        self.q_actual = np.zeros(self.env_info['robot']['n_joints'])
+        self.q_cmd = np.zeros(self.env_info["robot"]["n_joints"])
+        self.q_actual = np.zeros(self.env_info["robot"]["n_joints"])
 
-        self.dq_cmd = np.zeros(self.env_info['robot']['n_joints'])
-        self.dq_actual = np.zeros(self.env_info['robot']['n_joints'])
+        self.dq_cmd = np.zeros(self.env_info["robot"]["n_joints"])
+        self.dq_actual = np.zeros(self.env_info["robot"]["n_joints"])
 
         self.x_cmd = np.zeros(3)
         self.x_actual = np.zeros(3)
@@ -775,7 +955,7 @@ class SystemState:
 
         self.predicted_state = np.zeros(6)
         self.predicted_cov = np.eye(6)
-        self.predicted_time = 0.
+        self.predicted_time = 0.0
         self.estimated_state = np.zeros(6)
 
         self.tactic_current = TACTICS.READY
@@ -794,11 +974,11 @@ class SystemState:
     def reset(self):
         self.restart = True
 
-        self.q_cmd = np.zeros(self.env_info['robot']['n_joints'])
-        self.q_actual = np.zeros(self.env_info['robot']['n_joints'])
+        self.q_cmd = np.zeros(self.env_info["robot"]["n_joints"])
+        self.q_actual = np.zeros(self.env_info["robot"]["n_joints"])
 
-        self.dq_cmd = np.zeros(self.env_info['robot']['n_joints'])
-        self.dq_actual = np.zeros(self.env_info['robot']['n_joints'])
+        self.dq_cmd = np.zeros(self.env_info["robot"]["n_joints"])
+        self.dq_actual = np.zeros(self.env_info["robot"]["n_joints"])
 
         self.x_cmd = np.zeros(3)
         self.x_actual = np.zeros(3)
@@ -808,7 +988,7 @@ class SystemState:
 
         self.predicted_state = np.zeros(6)
         self.predicted_cov = np.eye(6)
-        self.predicted_time = 0.
+        self.predicted_time = 0.0
         self.estimated_state = np.zeros(6)
 
         self.tactic_current = TACTICS.READY
@@ -856,21 +1036,23 @@ class SystemState:
         else:
             self.puck_static_count = 0
             puck_dir = self.puck_tracker.state[2:4] / np.linalg.norm(self.puck_tracker.state[2:4])
-            if np.abs(np.dot(puck_dir, np.array([1., 0]))) < 0.15:
+            if np.abs(np.dot(puck_dir, np.array([1.0, 0]))) < 0.15:
                 self.puck_transversal_moving_count += 1
                 self.puck_approaching_count = 0
             else:
                 if self.puck_tracker.state[2] < 0 and self.puck_tracker.state[0] > self.agent_params.defend_range[0]:
                     self.puck_approaching_count += 1
 
-    def update_prediction(self, prediction_time, stop_line=0.):
-        self.predicted_state, self.predicted_cov, self.predicted_time = \
-            self.puck_tracker.get_prediction(prediction_time, stop_line)
+    def update_prediction(self, prediction_time, stop_line=0.0):
+        self.predicted_state, self.predicted_cov, self.predicted_time = self.puck_tracker.get_prediction(
+            prediction_time, stop_line
+        )
 
     def update_ee_pos_vel(self, joint_pos, joint_vel):
         x_ee, _ = forward_kinematics(self.robot_model, self.robot_data, joint_pos)
-        v_ee = jacobian(self.robot_model, self.robot_data, joint_pos)[:3,
-                                                                      :self.env_info['robot']['n_joints']] @ joint_vel
+        v_ee = (
+            jacobian(self.robot_model, self.robot_data, joint_pos)[:3, : self.env_info["robot"]["n_joints"]] @ joint_vel
+        )
         return x_ee, v_ee
 
 
@@ -882,12 +1064,18 @@ class CubicLinearPlanner:
 
     def plan(self, start_pos, start_vel, end_pos, end_vel, t_total):
         t_total = self._round_time(t_total)
-        coef = np.array([[1, 0, 0, 0], [1, t_total, t_total ** 2, t_total ** 3],
-                         [0, 1, 0, 0], [0, 1, 2 * t_total, 3 * t_total ** 2]])
+        coef = np.array(
+            [
+                [1, 0, 0, 0],
+                [1, t_total, t_total**2, t_total**3],
+                [0, 1, 0, 0],
+                [0, 1, 2 * t_total, 3 * t_total**2],
+            ]
+        )
         results = np.vstack([start_pos, end_pos, start_vel, end_vel])
 
         A = scipy.linalg.block_diag(*[coef] * start_pos.shape[-1])
-        y = results.reshape(-1, order='F')
+        y = results.reshape(-1, order="F")
 
         weights = np.linalg.solve(A, y).reshape(start_pos.shape[-1], 4)
         weights_d = np.polynomial.polynomial.polyder(weights, axis=1)
@@ -895,8 +1083,8 @@ class CubicLinearPlanner:
 
         t = np.linspace(self.step_size, t_total, int(t_total / self.step_size))
 
-        x = weights[:, 0:1] + weights[:, 1:2] * t + weights[:, 2:3] * t ** 2 + weights[:, 3:4] * t ** 3
-        dx = weights_d[:, 0:1] + weights_d[:, 1:2] * t + weights_d[:, 2:3] * t ** 2
+        x = weights[:, 0:1] + weights[:, 1:2] * t + weights[:, 2:3] * t**2 + weights[:, 3:4] * t**3
+        dx = weights_d[:, 0:1] + weights_d[:, 1:2] * t + weights_d[:, 2:3] * t**2
         ddx = weights_dd[:, 0:1] + weights_dd[:, 1:2] * t
         return np.hstack([x.T, dx.T, ddx.T])
 
@@ -954,13 +1142,12 @@ class BezierPlanner:
         dz_start = 0
         dz_stop = 0
         if h_01 == 0 and h_23 == 0:
-            self.p1 = (p_start + v_start * h_01)
-            self.p2 = (p_stop - v_stop * h_23)
+            self.p1 = p_start + v_start * h_01
+            self.p2 = p_stop - v_stop * h_23
         elif h_01 == 0:
             l_start = p_stop - v_stop * h_23
             min_length = np.minimum(0.15 / h_23, 1)
-            self.p2 = self.get_closest_point_from_line_to_point(l_start, p_stop, p_start,
-                                                                [0, 1 - min_length])
+            self.p2 = self.get_closest_point_from_line_to_point(l_start, p_stop, p_start, [0, 1 - min_length])
             self.p1 = p_start
             dz_stop = np.linalg.norm(v_stop) / np.linalg.norm(self.p3 - self.p2) / 3
         elif h_23 == 0:
@@ -974,9 +1161,9 @@ class BezierPlanner:
             l2_start = p_stop - v_stop * h_23
             min_length1 = np.minimum(0.15 / h_01, 1)
             min_length2 = np.minimum(0.15 / h_23, 1)
-            self.p1, self.p2 = self.get_closest_point_between_line_segments(p_start, l1_end, l2_start, p_stop,
-                                                                            np.array([[min_length1, 1],
-                                                                                      [0, 1 - min_length2]]))
+            self.p1, self.p2 = self.get_closest_point_between_line_segments(
+                p_start, l1_end, l2_start, p_stop, np.array([[min_length1, 1], [0, 1 - min_length2]])
+            )
             self.p1 = self.p1
             self.p2 = self.p2
             dz_start = np.linalg.norm(v_start) / np.linalg.norm(self.p1 - self.p0) / 3
@@ -1020,8 +1207,8 @@ class BezierPlanner:
     def get_point(self, t):
         z, dz_dt, ddz_ddt = self.get_time_bezier_root(t)
 
-        z2 = z ** 2
-        z3 = z ** 3
+        z2 = z**2
+        z3 = z**3
         nz_1 = 1 - z
         nz_2 = nz_1 * nz_1
         nz_3 = nz_2 * nz_1
@@ -1029,24 +1216,37 @@ class BezierPlanner:
         p = nz_3 * self.p0 + 3 * nz_2 * z * self.p1 + 3 * nz_1 * z2 * self.p2 + z3 * self.p3
         dp_dz = 3 * nz_2 * (self.p1 - self.p0) + 6 * nz_1 * z * (self.p2 - self.p1) + 3 * z2 * (self.p3 - self.p2)
         ddp_ddz = 6 * nz_1 * (self.p2 - 2 * self.p1 + self.p0) + 6 * z * (self.p3 - 2 * self.p2 + self.p1)
-        return p, dp_dz * dz_dt, ddp_ddz * dz_dt ** 2 + dp_dz * ddz_ddt
+        return p, dp_dz * dz_dt, ddp_ddz * dz_dt**2 + dp_dz * ddz_ddt
 
     def get_time_bezier_root(self, t):
         if np.isscalar(t):
-            cubic_polynomial = np.polynomial.polynomial.Polynomial([self.z0[0] - t,
-                                                                    -3 * self.z0[0] + 3 * self.z1[0],
-                                                                    3 * self.z0[0] - 6 * self.z1[0] + 3 * self.z2[0],
-                                                                    -self.z0[0] + 3 * self.z1[0] - 3 * self.z2[0] +
-                                                                    self.z3[0]])
+            cubic_polynomial = np.polynomial.polynomial.Polynomial(
+                [
+                    self.z0[0] - t,
+                    -3 * self.z0[0] + 3 * self.z1[0],
+                    3 * self.z0[0] - 6 * self.z1[0] + 3 * self.z2[0],
+                    -self.z0[0] + 3 * self.z1[0] - 3 * self.z2[0] + self.z3[0],
+                ]
+            )
 
         tau_orig = cubic_polynomial.roots()
-        tau = tau_orig.real[np.logical_and(np.logical_and(tau_orig >= -1e-6, tau_orig <= 1. + 1e-6),
-                                           np.logical_not(np.iscomplex(tau_orig)))]
+        tau = tau_orig.real[
+            np.logical_and(
+                np.logical_and(tau_orig >= -1e-6, tau_orig <= 1.0 + 1e-6), np.logical_not(np.iscomplex(tau_orig))
+            )
+        ]
         tau = tau[0]
-        z = (1 - tau) ** 3 * self.z0 + 3 * (1 - tau) ** 2 * tau * self.z1 + 3 * (1 - tau) * (tau ** 2) * self.z2 + (
-            tau ** 3) * self.z3
-        dz_dtau = 3 * (1 - tau) ** 2 * (self.z1 - self.z0) + 6 * (1 - tau) * tau * (
-            self.z2 - self.z1) + 3 * tau ** 2 * (self.z3 - self.z2)
+        z = (
+            (1 - tau) ** 3 * self.z0
+            + 3 * (1 - tau) ** 2 * tau * self.z1
+            + 3 * (1 - tau) * (tau**2) * self.z2
+            + (tau**3) * self.z3
+        )
+        dz_dtau = (
+            3 * (1 - tau) ** 2 * (self.z1 - self.z0)
+            + 6 * (1 - tau) * tau * (self.z2 - self.z1)
+            + 3 * tau**2 * (self.z3 - self.z2)
+        )
         ddz_ddtau = 6 * (1 - tau) * (self.z2 - 2 * self.z1 + self.z0) + 6 * tau * (self.z3 - 2 * self.z2 + self.z1)
 
         z_t = z[1]
@@ -1056,8 +1256,11 @@ class BezierPlanner:
 
     def update_bezier_curve(self, t_start, p_stop, v_stop, t_final):
         z, dz_dt, _ = self.get_time_bezier_root(t_start)
-        dp_dz = 3 * (1 - z) ** 2 * (self.p1 - self.p0) + 6 * (1 - z) * z * (self.p2 - self.p1) + 3 * z ** 2 * (
-            self.p3 - self.p2)
+        dp_dz = (
+            3 * (1 - z) ** 2 * (self.p1 - self.p0)
+            + 6 * (1 - z) * z * (self.p2 - self.p1)
+            + 3 * z**2 * (self.p3 - self.p2)
+        )
 
         h_23 = np.inf
         for b in self.boundary:
@@ -1075,14 +1278,19 @@ class BezierPlanner:
         else:
             l2_start = p_stop - v_stop * h_23
             min_length2 = np.minimum(0.1 / h_23, 1)
-            _, p2_new = self.get_closest_point_between_line_segments(self.p0, self.p1, l2_start,
-                                                                     p_stop, np.array([[0, 1], [0, 1 - min_length2]]))
+            _, p2_new = self.get_closest_point_between_line_segments(
+                self.p0, self.p1, l2_start, p_stop, np.array([[0, 1], [0, 1 - min_length2]])
+            )
         p3_new = p_stop
 
-        p_new = np.array([[-(z - 1) ** 3, 3 * (z - 1) ** 2 * z, -3 * (z - 1) * z ** 2, z ** 3],
-                          [0, (z - 1) ** 2, -2 * (z - 1) * z, z ** 2],
-                          [0, 0, 1 - z, z],
-                          [0, 0, 0, 1]]) @ np.vstack([self.p0, self.p1, self.p2, self.p3])
+        p_new = np.array(
+            [
+                [-((z - 1) ** 3), 3 * (z - 1) ** 2 * z, -3 * (z - 1) * z**2, z**3],
+                [0, (z - 1) ** 2, -2 * (z - 1) * z, z**2],
+                [0, 0, 1 - z, z],
+                [0, 0, 0, 1],
+            ]
+        ) @ np.vstack([self.p0, self.p1, self.p2, self.p3])
 
         self.p0 = p_new[0].copy()
         self.p1 = p_new[1].copy()
@@ -1107,7 +1315,7 @@ class BezierPlanner:
     def get_closest_point_from_line_to_point(l0, l1, p, range=None):
         v = l1 - l0
         u = l0 - p
-        t = - np.dot(v, u) / np.dot(v, v)
+        t = -np.dot(v, u) / np.dot(v, v)
         t = np.clip(t, 0, 1)
         if range is not None:
             t = np.clip(t, range[0], range[1])
@@ -1118,8 +1326,7 @@ class BezierPlanner:
         v = l1s - l2s  # d13
         u = l2e - l2s  # d43
         w = l1e - l1s  # d21
-        A = np.array([[w @ w, -u @ w],
-                      [w @ u, -u @ u]])
+        A = np.array([[w @ w, -u @ w], [w @ u, -u @ u]])
         b = -np.array([[v @ w], [v @ u]])
         if np.linalg.det(A) != 0:
             mu = np.linalg.solve(A, b)
@@ -1141,16 +1348,17 @@ class BezierPlanner:
 
 ### optimizer.py ###
 
+
 class TrajectoryOptimizer:
     def __init__(self, env_info):
         self.env_info = env_info
-        self.robot_model = copy.deepcopy(env_info['robot']['robot_model'])
-        self.robot_data = copy.deepcopy(env_info['robot']['robot_data'])
-        self.n_joints = self.env_info['robot']['n_joints']
+        self.robot_model = copy.deepcopy(env_info["robot"]["robot_model"])
+        self.robot_data = copy.deepcopy(env_info["robot"]["robot_data"])
+        self.n_joints = self.env_info["robot"]["n_joints"]
         if self.n_joints == 3:
             self.anchor_weights = np.ones(3)
         else:
-            self.anchor_weights = np.array([10., 1., 10., 1., 10., 10., 1.])
+            self.anchor_weights = np.array([10.0, 1.0, 10.0, 1.0, 10.0, 10.0, 1.0])
 
     def optimize_trajectory(self, cart_traj, q_start, dq_start, q_anchor):
         joint_trajectory = np.tile(np.concatenate([q_start]), (cart_traj.shape[0], 1))
@@ -1162,14 +1370,14 @@ class TrajectoryOptimizer:
                 if q_anchor is None:
                     dq_anchor = 0
                 else:
-                    dq_anchor = (q_anchor - q_cur)
+                    dq_anchor = q_anchor - q_cur
 
                 success, dq_next = self._solve_aqp(des_point[:3], q_cur, dq_anchor)
 
                 if not success:
                     return success, []
                 else:
-                    q_cur += (dq_cur + dq_next) / 2 * self.env_info['dt']
+                    q_cur += (dq_cur + dq_next) / 2 * self.env_info["dt"]
                     # q_cur += dq_next * self.env_info['dt']
                     dq_cur = dq_next
                     joint_trajectory[i] = q_cur.copy()
@@ -1179,23 +1387,33 @@ class TrajectoryOptimizer:
 
     def _solve_aqp(self, x_des, q_cur, dq_anchor):
         x_cur = forward_kinematics(self.robot_model, self.robot_data, q_cur)[0]
-        jac = jacobian(self.robot_model, self.robot_data, q_cur)[:3, :self.n_joints]
+        jac = jacobian(self.robot_model, self.robot_data, q_cur)[:3, : self.n_joints]
         N_J = scipy.linalg.null_space(jac)
-        b = np.linalg.lstsq(jac, (x_des - x_cur) / self.env_info['dt'], rcond=None)[0]
+        b = np.linalg.lstsq(jac, (x_des - x_cur) / self.env_info["dt"], rcond=None)[0]
 
         P = (N_J.T @ np.diag(self.anchor_weights) @ N_J) / 2
         q = (b - dq_anchor).T @ np.diag(self.anchor_weights) @ N_J
         A = N_J.copy()
-        u = np.minimum(self.env_info['robot']['joint_vel_limit'][1] * 0.9,
-                       (self.env_info['robot']['joint_pos_limit'][1] * 0.92 - q_cur) / self.env_info['dt']) - b
-        l = np.maximum(self.env_info['robot']['joint_vel_limit'][0] * 0.9,
-                       (self.env_info['robot']['joint_pos_limit'][0] * 0.92 - q_cur) / self.env_info['dt']) - b
+        u = (
+            np.minimum(
+                self.env_info["robot"]["joint_vel_limit"][1] * 0.9,
+                (self.env_info["robot"]["joint_pos_limit"][1] * 0.92 - q_cur) / self.env_info["dt"],
+            )
+            - b
+        )
+        l = (
+            np.maximum(
+                self.env_info["robot"]["joint_vel_limit"][0] * 0.9,
+                (self.env_info["robot"]["joint_pos_limit"][0] * 0.92 - q_cur) / self.env_info["dt"],
+            )
+            - b
+        )
 
         solver = osqp.OSQP()
         solver.setup(P=sparse.csc_matrix(P), q=q, A=sparse.csc_matrix(A), l=l, u=u, verbose=False, polish=False)
 
         result = solver.solve()
-        if result.info.status == 'solved':
+        if result.info.status == "solved":
             return True, N_J @ result.x + b
         else:
             return False, b
@@ -1213,13 +1431,16 @@ class TrajectoryOptimizer:
 
         def _nlopt_h(q, grad):
             if grad.size > 0:
-                grad[...] = 2 * (forward_kinematics(self.robot_model, self.robot_data, q)[0] - x_des) @ \
-                    jacobian(self.robot_model, self.robot_data, q)[:3, :dim]
+                grad[...] = (
+                    2
+                    * (forward_kinematics(self.robot_model, self.robot_data, q)[0] - x_des)
+                    @ jacobian(self.robot_model, self.robot_data, q)[:3, :dim]
+                )
             return np.linalg.norm(forward_kinematics(self.robot_model, self.robot_data, q)[0] - x_des) ** 2 - 1e-4
 
         opt.set_max_objective(_nlopt_f)
-        opt.set_lower_bounds(self.env_info['robot']['joint_pos_limit'][0])
-        opt.set_upper_bounds(self.env_info['robot']['joint_pos_limit'][1])
+        opt.set_lower_bounds(self.env_info["robot"]["joint_pos_limit"][0])
+        opt.set_upper_bounds(self.env_info["robot"]["joint_pos_limit"][1])
         opt.add_inequality_constraint(_nlopt_h)
         opt.set_ftol_abs(1e-6)
         opt.set_xtol_abs(1e-8)
@@ -1253,7 +1474,7 @@ class TrajectoryOptimizer:
         lower_limit = (q_l + q_h) / 2 - 0.95 * (q_h - q_l) / 2
         upper_limit = (q_l + q_h) / 2 + 0.95 * (q_h - q_l) / 2
 
-        name = link_to_xml_name(self.robot_model, 'ee')
+        name = link_to_xml_name(self.robot_model, "ee")
 
         def objective(q, grad):
             if grad.size > 0:
@@ -1324,42 +1545,63 @@ def numerical_grad(fun, q):
 
 ### trajectory_generator.py ###
 class TrajectoryGenerator:
-    def __init__(self, env_info, agent_params: AgentParams, system_state: SystemState):
+    def __init__(
+        self,
+        env_info,
+        # agent_params: AgentParams,
+        system_state: SystemState,
+    ):
         self.env_info = env_info
-        self.dt = 1 / self.env_info['robot']['control_frequency']
+        self.dt = 1 / self.env_info["robot"]["control_frequency"]
         self.agent_params = agent_params
         self.state = system_state
         self.bezier_planner = self._init_bezier_planner()
-        self.cubic_linear_planner = CubicLinearPlanner(self.env_info['robot']['n_joints'], self.dt)
+        self.cubic_linear_planner = CubicLinearPlanner(self.env_info["robot"]["n_joints"], self.dt)
         self.optimizer = TrajectoryOptimizer(self.env_info)
 
     def generate_stop_trajectory(self):
         q_plan = self.state.q_cmd + self.state.dq_cmd * 0.04
-        joint_pos_traj = self.plan_cubic_linear_motion(self.state.q_cmd, self.state.dq_cmd, q_plan,
-                                                       np.zeros_like(q_plan), 0.10)[:, :q_plan.shape[0]]
+        joint_pos_traj = self.plan_cubic_linear_motion(
+            self.state.q_cmd, self.state.dq_cmd, q_plan, np.zeros_like(q_plan), 0.10
+        )[:, : q_plan.shape[0]]
 
         t = np.linspace(0, joint_pos_traj.shape[0], joint_pos_traj.shape[0] + 1) * 0.02
-        f = CubicSpline(t, np.vstack([self.state.q_cmd, joint_pos_traj]), axis=0, bc_type=((1, self.state.dq_cmd),
-                                                                                           (2, np.zeros_like(q_plan))))
+        f = CubicSpline(
+            t,
+            np.vstack([self.state.q_cmd, joint_pos_traj]),
+            axis=0,
+            bc_type=((1, self.state.dq_cmd), (2, np.zeros_like(q_plan))),
+        )
         df = f.derivative(1)
         self.state.trajectory_buffer = np.stack([f(t[1:]), df(t[1:])]).swapaxes(0, 1)
         return True
 
     def _init_bezier_planner(self):
-        self.bound_points = np.array([[-(self.env_info['table']['length'] / 2 - self.env_info['mallet']['radius']),
-                                       -(self.env_info['table']['width'] / 2 - self.env_info['mallet']['radius'])],
-                                      [-(self.env_info['table']['length'] / 2 - self.env_info['mallet']['radius']),
-                                       (self.env_info['table']['width'] / 2 - self.env_info['mallet']['radius'])],
-                                      [-0.1, (self.env_info['table']['width'] / 2 - self.env_info['mallet']['radius'])],
-                                      [-0.1, -(self.env_info['table']['width'] / 2 - self.env_info['mallet']['radius'])]
-                                      ])
-        self.bound_points = self.bound_points + np.tile([1.51, 0.], (4, 1))
+        self.bound_points = np.array(
+            [
+                [
+                    -(self.env_info["table"]["length"] / 2 - self.env_info["mallet"]["radius"]),
+                    -(self.env_info["table"]["width"] / 2 - self.env_info["mallet"]["radius"]),
+                ],
+                [
+                    -(self.env_info["table"]["length"] / 2 - self.env_info["mallet"]["radius"]),
+                    (self.env_info["table"]["width"] / 2 - self.env_info["mallet"]["radius"]),
+                ],
+                [-0.1, (self.env_info["table"]["width"] / 2 - self.env_info["mallet"]["radius"])],
+                [-0.1, -(self.env_info["table"]["width"] / 2 - self.env_info["mallet"]["radius"])],
+            ]
+        )
+        self.bound_points = self.bound_points + np.tile([1.51, 0.0], (4, 1))
         self.boundary_idx = np.array([[0, 1], [1, 2], [0, 3]])
 
-        table_bounds = np.array([[self.bound_points[0], self.bound_points[1]],
-                                 [self.bound_points[1], self.bound_points[2]],
-                                 [self.bound_points[2], self.bound_points[3]],
-                                 [self.bound_points[3], self.bound_points[0]]])
+        table_bounds = np.array(
+            [
+                [self.bound_points[0], self.bound_points[1]],
+                [self.bound_points[1], self.bound_points[2]],
+                [self.bound_points[2], self.bound_points[3]],
+                [self.bound_points[3], self.bound_points[0]],
+            ]
+        )
         return BezierPlanner(table_bounds, self.dt)
 
     def plan_cubic_linear_motion(self, start_pos, start_vel, end_pos, end_vel, t_total=None):
@@ -1378,25 +1620,25 @@ class TrajectoryGenerator:
         dp = res[:, 1]
         ddp = res[:, 2]
 
-        p = np.hstack([p, np.ones((p.shape[0], 1)) * self.env_info['robot']["ee_desired_height"]])
+        p = np.hstack([p, np.ones((p.shape[0], 1)) * self.env_info["robot"]["ee_desired_height"]])
         dp = np.hstack([dp, np.zeros((p.shape[0], 1))])
         ddp = np.hstack([ddp, np.zeros((p.shape[0], 1))])
         return np.hstack([p, dp, ddp])
 
     def optimize_trajectory(self, cart_traj, q_start, dq_start, q_anchor):
-        success, joint_pos_traj = self.optimizer.optimize_trajectory(cart_traj, q_start, dq_start,
-                                                                     q_anchor)
+        success, joint_pos_traj = self.optimizer.optimize_trajectory(cart_traj, q_start, dq_start, q_anchor)
         if len(joint_pos_traj) > 1:
             t = np.linspace(0, joint_pos_traj.shape[0], joint_pos_traj.shape[0] + 1) * 0.02
-            f = CubicSpline(t, np.vstack([q_start, joint_pos_traj]), axis=0, bc_type=((1, dq_start),
-                                                                                      (2, np.zeros_like(dq_start))))
+            f = CubicSpline(
+                t, np.vstack([q_start, joint_pos_traj]), axis=0, bc_type=((1, dq_start), (2, np.zeros_like(dq_start)))
+            )
             df = f.derivative(1)
             return success, np.stack([f(t[1:]), df(t[1:])]).swapaxes(0, 1)
         else:
             return success, []
 
     def solve_anchor_pos(self, hit_pos_2d, hit_dir_2d, q_0):
-        hit_pos = np.concatenate([hit_pos_2d, [self.env_info['robot']["ee_desired_height"]]])
+        hit_pos = np.concatenate([hit_pos_2d, [self.env_info["robot"]["ee_desired_height"]]])
         hit_dir = np.concatenate([hit_dir_2d, [0]])
         success, q_star = self.optimizer.solve_hit_config(hit_pos, hit_dir, q_0)
         if not success:
@@ -1404,7 +1646,7 @@ class TrajectoryGenerator:
         return q_star
 
     def solve_anchor_pos_ik_null(self, hit_pos_2d, hit_dir_2d, q_0):
-        hit_pos = np.concatenate([hit_pos_2d, [self.env_info['robot']["ee_desired_height"]]])
+        hit_pos = np.concatenate([hit_pos_2d, [self.env_info["robot"]["ee_desired_height"]]])
         hit_dir = np.concatenate([hit_dir_2d, [0]])
         success, q_star = self.optimizer.solve_hit_config_ik_null(hit_pos, hit_dir, q_0)
         if not success:
@@ -1414,8 +1656,15 @@ class TrajectoryGenerator:
 
 ### tactics.py ###
 
+
 class Tactic:
-    def __init__(self, env_info, agent_params: AgentParams, state: SystemState, trajectory_generator: TrajectoryGenerator):
+    def __init__(
+        self,
+        env_info,
+        # agent_params: AgentParams,
+        state: SystemState,
+        trajectory_generator: TrajectoryGenerator,
+    ):
         self.env_info = env_info
         self.agent_params = agent_params
         self.state = state
@@ -1434,8 +1683,7 @@ class Tactic:
 
     def update_tactic(self):
         self._update_prediction()
-        if self.state.switch_tactics_count > self.agent_params.switch_tactics_min_steps or \
-                self.state.tactic_finish:
+        if self.state.switch_tactics_count > self.agent_params.switch_tactics_min_steps or self.state.tactic_finish:
             self._update_tactic_impl()
         else:
             self.state.switch_tactics_count += 1
@@ -1458,34 +1706,45 @@ class Tactic:
 
     def can_smash(self):
         if self.state.is_puck_static():
-            if self.agent_params.hit_range[0] < self.state.predicted_state[0] < self.agent_params.hit_range[1] \
-                    and np.abs(self.state.predicted_state[1]) < self.env_info['table']['width'] / 2 - \
-                    self.env_info['puck']['radius'] - 2 * self.env_info['mallet']['radius']:
+            if (
+                self.agent_params.hit_range[0] < self.state.predicted_state[0] < self.agent_params.hit_range[1]
+                and np.abs(self.state.predicted_state[1])
+                < self.env_info["table"]["width"] / 2
+                - self.env_info["puck"]["radius"]
+                - 2 * self.env_info["mallet"]["radius"]
+            ):
                 return True
         return False
 
     def should_defend(self):
         if self.state.is_puck_approaching():
-            if self.agent_params.defend_range[0] <= self.state.predicted_state[0] <= \
-                    self.agent_params.defend_range[1] \
-                    and np.abs(self.state.predicted_state[1]) <= self.agent_params.defend_width and \
-                    self.state.predicted_time >= self.agent_params.max_plan_steps * self.generator.dt:
+            if (
+                self.agent_params.defend_range[0] <= self.state.predicted_state[0] <= self.agent_params.defend_range[1]
+                and np.abs(self.state.predicted_state[1]) <= self.agent_params.defend_width
+                and self.state.predicted_time >= self.agent_params.max_plan_steps * self.generator.dt
+            ):
                 return True
-            elif self.state.predicted_time < self.agent_params.max_prediction_time and \
-                    self.state.predicted_state[0] > self.agent_params.defend_range[1]:
-                self.state.predicted_time += ((self.agent_params.defend_range[1] - self.state.predicted_state[0]) /
-                                              self.state.predicted_state[2])
-                self.state.predicted_time = np.clip(self.state.predicted_time, 0,
-                                                    self.agent_params.max_prediction_time)
+            elif (
+                self.state.predicted_time < self.agent_params.max_prediction_time
+                and self.state.predicted_state[0] > self.agent_params.defend_range[1]
+            ):
+                self.state.predicted_time += (
+                    self.agent_params.defend_range[1] - self.state.predicted_state[0]
+                ) / self.state.predicted_state[2]
+                self.state.predicted_time = np.clip(self.state.predicted_time, 0, self.agent_params.max_prediction_time)
         return False
 
     def is_puck_stuck(self):
         if self.state.is_puck_static():
             if self.state.predicted_state[0] < self.agent_params.hit_range[0]:
                 return True
-            elif self.state.predicted_state[0] < self.agent_params.hit_range[1] \
-                    and np.abs(self.state.predicted_state[1]) > self.env_info['table']['width'] / 2 - \
-                    self.env_info['puck']['radius'] - 2 * self.env_info['mallet']['radius']:
+            elif (
+                self.state.predicted_state[0] < self.agent_params.hit_range[1]
+                and np.abs(self.state.predicted_state[1])
+                > self.env_info["table"]["width"] / 2
+                - self.env_info["puck"]["radius"]
+                - 2 * self.env_info["mallet"]["radius"]
+            ):
                 return True
         return False
 
@@ -1519,17 +1778,30 @@ class Init(Tactic):
                     t_init *= 1.2
 
     def _plan_init_trajectory(self, t_final):
-        cart_traj = self.generator.plan_cubic_linear_motion(self.state.x_cmd, self.state.v_cmd,
-                                                            self.agent_params.x_init, np.zeros(3), t_final)
+        cart_traj = self.generator.plan_cubic_linear_motion(
+            self.state.x_cmd, self.state.v_cmd, self.agent_params.x_init, np.zeros(3), t_final
+        )
         opt_success, self.state.trajectory_buffer = self.generator.optimize_trajectory(
-            cart_traj, self.state.q_cmd, self.state.dq_cmd, self.agent_params.joint_anchor_pos)
+            cart_traj, self.state.q_cmd, self.state.dq_cmd, self.agent_params.joint_anchor_pos
+        )
         return opt_success
 
 
 class Ready(Tactic):
-    def __init__(self, env_info, agent_params, state: SystemState, trajectory_generator: TrajectoryGenerator,
-                 only_tactic=None):
-        super(Ready, self).__init__(env_info, agent_params, state, trajectory_generator)
+    def __init__(
+        self,
+        env_info,
+        # agent_params,
+        state: SystemState,
+        trajectory_generator: TrajectoryGenerator,
+        only_tactic=None,
+    ):
+        super(Ready, self).__init__(
+            env_info,
+            # agent_params,
+            state,
+            trajectory_generator,
+        )
 
         self.only_tactic = only_tactic
 
@@ -1561,13 +1833,16 @@ class Ready(Tactic):
             self.replan_time = 0
             self.switch_count = 0
             self.state.predicted_time = self.agent_params.max_prediction_time
-            self.t_stop = np.maximum(np.linalg.norm(self.agent_params.x_home - self.state.x_cmd) /
-                                     self.agent_params.default_linear_vel, 1.0)
+            self.t_stop = np.maximum(
+                np.linalg.norm(self.agent_params.x_home - self.state.x_cmd) / self.agent_params.default_linear_vel, 1.0
+            )
             return True
         else:
             if len(self.state.trajectory_buffer) == 0:
-                self.t_stop = np.maximum(np.linalg.norm(self.agent_params.x_home - self.state.x_cmd) /
-                                         self.agent_params.default_linear_vel, 1.0)
+                self.t_stop = np.maximum(
+                    np.linalg.norm(self.agent_params.x_home - self.state.x_cmd) / self.agent_params.default_linear_vel,
+                    1.0,
+                )
                 return True
         return False
 
@@ -1576,13 +1851,14 @@ class Ready(Tactic):
 
         for i in range(10):
             if self.plan_new_trajectory:
-                self.generator.bezier_planner.compute_control_point(self.state.x_cmd[:2], self.state.v_cmd[:2],
-                                                                    self.agent_params.x_home[:2], np.zeros(2),
-                                                                    self.t_stop)
+                self.generator.bezier_planner.compute_control_point(
+                    self.state.x_cmd[:2], self.state.v_cmd[:2], self.agent_params.x_home[:2], np.zeros(2), self.t_stop
+                )
             else:
                 if self.generator.bezier_planner.t_final > self.replan_time:
-                    self.generator.bezier_planner.update_bezier_curve(self.replan_time, self.agent_params.x_home[:2],
-                                                                      np.zeros(2), self.t_stop)
+                    self.generator.bezier_planner.update_bezier_curve(
+                        self.replan_time, self.agent_params.x_home[:2], np.zeros(2), self.t_stop
+                    )
 
             if self.generator.bezier_planner.t_final >= 2 * self.agent_params.max_plan_steps * self.generator.dt:
                 cart_traj = self.generator.generate_bezier_trajectory(self.agent_params.max_plan_steps)
@@ -1594,13 +1870,15 @@ class Ready(Tactic):
                 return
 
             success, self.state.trajectory_buffer = self.generator.optimize_trajectory(
-                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.agent_params.joint_anchor_pos)
+                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.agent_params.joint_anchor_pos
+            )
 
             if success:
                 self.replan_time = self.agent_params.max_plan_steps * self.generator.dt
                 self.plan_new_trajectory = False
-                self.t_stop = self.generator.bezier_planner.t_final - \
-                    self.state.trajectory_buffer.shape[0] * self.generator.dt
+                self.t_stop = (
+                    self.generator.bezier_planner.t_final - self.state.trajectory_buffer.shape[0] * self.generator.dt
+                )
                 self.state.predicted_time = np.maximum(0, self.state.predicted_time)
                 return
             self.t_stop *= 1.5
@@ -1650,22 +1928,26 @@ class Prepare(Tactic):
             hit_vel_mag = 0.2
 
         hit_dir_2d = hit_dir_2d / np.linalg.norm(hit_dir_2d)
-        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info['mallet']['radius'] +
-                                                     self.env_info['puck']['radius'])
+        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (
+            self.env_info["mallet"]["radius"] + self.env_info["puck"]["radius"]
+        )
         hit_vel_2d = hit_dir_2d * hit_vel_mag
 
         # self.q_anchor_pos = self.generator.solve_anchor_pos_ik_null(hit_pos_2d, hit_dir_2d, self.q_anchor_pos)
 
         for i in range(10):
             if self.plan_new_trajectory:
-                self.state.predicted_time = np.maximum(np.linalg.norm(self.state.x_cmd[:2] - puck_pos_2d) /
-                                                       self.agent_params.default_linear_vel, 1.0)
-                self.generator.bezier_planner.compute_control_point(self.state.x_cmd[:2], self.state.v_cmd[:2],
-                                                                    hit_pos_2d, hit_vel_2d, self.state.predicted_time)
+                self.state.predicted_time = np.maximum(
+                    np.linalg.norm(self.state.x_cmd[:2] - puck_pos_2d) / self.agent_params.default_linear_vel, 1.0
+                )
+                self.generator.bezier_planner.compute_control_point(
+                    self.state.x_cmd[:2], self.state.v_cmd[:2], hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                )
             else:
                 if self.generator.bezier_planner.t_final > self.replan_time:
-                    self.generator.bezier_planner.update_bezier_curve(self.replan_time, hit_pos_2d,
-                                                                      hit_vel_2d, self.state.predicted_time)
+                    self.generator.bezier_planner.update_bezier_curve(
+                        self.replan_time, hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                    )
 
             if self.generator.bezier_planner.t_final >= 2 * self.agent_params.max_plan_steps * self.generator.dt:
                 cart_traj = self.generator.generate_bezier_trajectory(self.agent_params.max_plan_steps)
@@ -1676,13 +1958,15 @@ class Prepare(Tactic):
                 break
 
             success, self.state.trajectory_buffer = self.generator.optimize_trajectory(
-                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos)
+                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos
+            )
 
             if success:
                 self.replan_time = self.agent_params.max_plan_steps * self.generator.dt
                 self.plan_new_trajectory = False
-                self.state.predicted_time = self.generator.bezier_planner.t_final - \
-                    self.state.trajectory_buffer.shape[0] * self.generator.dt
+                self.state.predicted_time = (
+                    self.generator.bezier_planner.t_final - self.state.trajectory_buffer.shape[0] * self.generator.dt
+                )
                 return
 
             self.state.predicted_time += self.agent_params.max_plan_steps * self.generator.dt
@@ -1724,19 +2008,21 @@ class Defend(Tactic):
 
         hit_dir_2d = np.array([0, np.sign(puck_pos_2d[1] + 1e-6)])
 
-        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info['mallet']['radius'])
+        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info["mallet"]["radius"])
         hit_vel_2d = hit_dir_2d * 0.05
 
         # self.q_anchor_pos = self.generator.solve_anchor_pos_ik_null(hit_pos_2d, hit_dir_2d, self.q_anchor_pos)
 
         for i in range(10):
             if self.plan_new_trajectory:
-                self.generator.bezier_planner.compute_control_point(self.state.x_cmd[:2], self.state.v_cmd[:2],
-                                                                    hit_pos_2d, hit_vel_2d, self.state.predicted_time)
+                self.generator.bezier_planner.compute_control_point(
+                    self.state.x_cmd[:2], self.state.v_cmd[:2], hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                )
             else:
                 if self.generator.bezier_planner.t_final > self.replan_time:
-                    self.generator.bezier_planner.update_bezier_curve(self.replan_time, hit_pos_2d,
-                                                                      hit_vel_2d, self.state.predicted_time)
+                    self.generator.bezier_planner.update_bezier_curve(
+                        self.replan_time, hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                    )
 
             if self.generator.bezier_planner.t_final >= 2 * self.agent_params.max_plan_steps * self.generator.dt:
                 cart_traj = self.generator.generate_bezier_trajectory(self.agent_params.max_plan_steps)
@@ -1747,15 +2033,16 @@ class Defend(Tactic):
                 break
 
             success, self.state.trajectory_buffer = self.generator.optimize_trajectory(
-                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos)
+                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos
+            )
 
             if success:
                 self.replan_time = self.agent_params.max_plan_steps * self.generator.dt
                 self.plan_new_trajectory = False
-                self.state.predicted_time = self.generator.bezier_planner.t_final - \
-                    self.state.trajectory_buffer.shape[0] * self.generator.dt
-                self.state.predicted_time = np.clip(self.state.predicted_time, 0,
-                                                    self.agent_params.max_prediction_time)
+                self.state.predicted_time = (
+                    self.generator.bezier_planner.t_final - self.state.trajectory_buffer.shape[0] * self.generator.dt
+                )
+                self.state.predicted_time = np.clip(self.state.predicted_time, 0, self.agent_params.max_prediction_time)
                 return
 
             self.state.predicted_time += self.agent_params.max_plan_steps * self.generator.dt
@@ -1777,8 +2064,19 @@ class Repel(Tactic):
 
 
 class Smash(Tactic):
-    def __init__(self, env_info, agent_params, state: SystemState, trajectory_generator: TrajectoryGenerator):
-        super().__init__(env_info, agent_params, state, trajectory_generator)
+    def __init__(
+        self,
+        env_info,
+        # agent_params,
+        state: SystemState,
+        trajectory_generator: TrajectoryGenerator,
+    ):
+        super().__init__(
+            env_info,
+            # agent_params,
+            state,
+            trajectory_generator,
+        )
         self.hit_vel_mag = self.agent_params.max_hit_velocity
         self.q_anchor_pos = self.agent_params.joint_anchor_pos
 
@@ -1816,17 +2114,19 @@ class Smash(Tactic):
         hit_dir_2d = hit_dir_2d / np.linalg.norm(hit_dir_2d)
         hit_vel_2d = hit_dir_2d * self.hit_vel_mag
 
-        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info['mallet']['radius'])
+        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info["mallet"]["radius"])
         self.q_anchor_pos = self.generator.solve_anchor_pos_ik_null(hit_pos_2d, hit_dir_2d, self.q_anchor_pos)
 
         for i in range(10):
             if self.plan_new_trajectory:
-                self.generator.bezier_planner.compute_control_point(self.state.x_cmd[:2], self.state.v_cmd[:2],
-                                                                    hit_pos_2d, hit_vel_2d, self.state.predicted_time)
+                self.generator.bezier_planner.compute_control_point(
+                    self.state.x_cmd[:2], self.state.v_cmd[:2], hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                )
             else:
                 if self.generator.bezier_planner.t_final > self.replan_time:
-                    self.generator.bezier_planner.update_bezier_curve(self.replan_time, hit_pos_2d,
-                                                                      hit_vel_2d, self.state.predicted_time)
+                    self.generator.bezier_planner.update_bezier_curve(
+                        self.replan_time, hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                    )
 
             if self.generator.bezier_planner.t_final >= 2 * self.agent_params.max_plan_steps * self.generator.dt:
                 cart_traj = self.generator.generate_bezier_trajectory(self.agent_params.max_plan_steps)
@@ -1838,13 +2138,15 @@ class Smash(Tactic):
                 return
 
             success, self.state.trajectory_buffer = self.generator.optimize_trajectory(
-                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos)
+                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos
+            )
 
             if success:
                 self.replan_time = self.agent_params.max_plan_steps * self.generator.dt
                 self.plan_new_trajectory = False
-                self.state.predicted_time = self.generator.bezier_planner.t_final - \
-                    self.state.trajectory_buffer.shape[0] * self.generator.dt
+                self.state.predicted_time = (
+                    self.generator.bezier_planner.t_final - self.state.trajectory_buffer.shape[0] * self.generator.dt
+                )
                 self.state.predicted_time = np.maximum(0, self.state.predicted_time)
                 return
 
@@ -1859,8 +2161,19 @@ class Smash(Tactic):
 
 ### tactic_smash_instruct.py ###
 class SmashInstruct(Tactic):
-    def __init__(self, env_info, agent_params, state: SystemState, trajectory_generator: TrajectoryGenerator):
-        super().__init__(env_info, agent_params, state, trajectory_generator)
+    def __init__(
+        self,
+        env_info,
+        # agent_params,
+        state: SystemState,
+        trajectory_generator: TrajectoryGenerator,
+    ):
+        super().__init__(
+            env_info,
+            # agent_params,
+            state,
+            trajectory_generator,
+        )
         self.hit_vel_mag = self.agent_params.max_hit_velocity
         self.q_anchor_pos = self.agent_params.joint_anchor_pos
         self.instructions = {}
@@ -1901,31 +2214,33 @@ class SmashInstruct(Tactic):
         goal_pos = np.array([2.49, 0.0])
         puck_pos_2d = self.state.predicted_state[:2]
 
-        if 'hit_angle' in self.instructions.keys():
-            hit_angle = np.clip(self.instructions['hit_angle'], -np.pi/2, np.pi/2)
+        if "hit_angle" in self.instructions.keys():
+            hit_angle = np.clip(self.instructions["hit_angle"], -np.pi / 2, np.pi / 2)
             hit_dir_2d = np.array([np.cos(hit_angle), np.sin(hit_angle)])
         else:
             hit_dir_2d = goal_pos - puck_pos_2d
         hit_dir_2d = hit_dir_2d / np.linalg.norm(hit_dir_2d)
 
-        if 'hit_velocity' in self.instructions.keys():
-            hit_vel_mag = np.clip(self.instructions['hit_velocity'], 0, 1.0)
+        if "hit_velocity" in self.instructions.keys():
+            hit_vel_mag = np.clip(self.instructions["hit_velocity"], 0, 1.0)
         else:
             hit_vel_mag = self.hit_vel_mag
 
         hit_vel_2d = hit_dir_2d * hit_vel_mag
 
-        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info['mallet']['radius'])
+        hit_pos_2d = puck_pos_2d[:2] - hit_dir_2d * (self.env_info["mallet"]["radius"])
         self.q_anchor_pos = self.generator.solve_anchor_pos_ik_null(hit_pos_2d, hit_dir_2d, self.q_anchor_pos)
 
         for i in range(10):
             if self.plan_new_trajectory:
-                self.generator.bezier_planner.compute_control_point(self.state.x_cmd[:2], self.state.v_cmd[:2],
-                                                                    hit_pos_2d, hit_vel_2d, self.state.predicted_time)
+                self.generator.bezier_planner.compute_control_point(
+                    self.state.x_cmd[:2], self.state.v_cmd[:2], hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                )
             else:
                 if self.generator.bezier_planner.t_final > self.replan_time:
-                    self.generator.bezier_planner.update_bezier_curve(self.replan_time, hit_pos_2d,
-                                                                      hit_vel_2d, self.state.predicted_time)
+                    self.generator.bezier_planner.update_bezier_curve(
+                        self.replan_time, hit_pos_2d, hit_vel_2d, self.state.predicted_time
+                    )
 
             if self.generator.bezier_planner.t_final >= 2 * self.agent_params.max_plan_steps * self.generator.dt:
                 cart_traj = self.generator.generate_bezier_trajectory(self.agent_params.max_plan_steps)
@@ -1937,13 +2252,15 @@ class SmashInstruct(Tactic):
                 return
 
             success, self.state.trajectory_buffer = self.generator.optimize_trajectory(
-                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos)
+                cart_traj, self.state.q_cmd, self.state.dq_cmd, self.q_anchor_pos
+            )
 
             if success:
                 self.replan_time = self.agent_params.max_plan_steps * self.generator.dt
                 self.plan_new_trajectory = False
-                self.state.predicted_time = self.generator.bezier_planner.t_final - \
-                    self.state.trajectory_buffer.shape[0] * self.generator.dt
+                self.state.predicted_time = (
+                    self.generator.bezier_planner.t_final - self.state.trajectory_buffer.shape[0] * self.generator.dt
+                )
                 self.state.predicted_time = np.maximum(0, self.state.predicted_time)
                 return
 
@@ -1956,23 +2273,59 @@ class SmashInstruct(Tactic):
         self.state.tactic_finish = True
 
 
-### baseline_agent_instruct.py ### 
+### baseline_agent_instruct.py ###
 class BaselineAgent(AgentBase):
     def __init__(self, env_info, agent_id=1, only_tactic=None, **kwargs):
         super(BaselineAgent, self).__init__(env_info, agent_id, **kwargs)
 
-        self.agent_params = AgentParams(env_info)
+        self.agent_params = agent_params
 
-        self.state = SystemState(self.env_info, agent_id, self.agent_params)
-        self.traj_generator = TrajectoryGenerator(self.env_info, self.agent_params, self.state)
+        self.state = SystemState(self.env_info, agent_id)  # , self.agent_params)
+        self.traj_generator = TrajectoryGenerator(
+            self.env_info,
+            # self.agent_params,
+            self.state,
+        )
 
-        self.tactics_processor = [Init(self.env_info, self.agent_params, self.state, self.traj_generator),
-                                  Ready(self.env_info, self.agent_params, self.state, self.traj_generator,
-                                        only_tactic=only_tactic),
-                                  Prepare(self.env_info, self.agent_params, self.state, self.traj_generator),
-                                  Defend(self.env_info, self.agent_params, self.state, self.traj_generator),
-                                  Repel(self.env_info, self.agent_params, self.state, self.traj_generator),
-                                  SmashInstruct(self.env_info, self.agent_params, self.state, self.traj_generator)]
+        self.tactics_processor = [
+            Init(
+                self.env_info,
+                # self.agent_params,
+                self.state,
+                self.traj_generator,
+            ),
+            Ready(
+                self.env_info,
+                # self.agent_params,
+                self.state,
+                self.traj_generator,
+                only_tactic=only_tactic,
+            ),
+            Prepare(
+                self.env_info,
+                # self.agent_params,
+                self.state,
+                self.traj_generator,
+            ),
+            Defend(
+                self.env_info,
+                # self.agent_params,
+                self.state,
+                self.traj_generator,
+            ),
+            Repel(
+                self.env_info,
+                # self.agent_params,
+                self.state,
+                self.traj_generator,
+            ),
+            SmashInstruct(
+                self.env_info,
+                # self.agent_params,
+                self.state,
+                self.traj_generator,
+            ),
+        ]
 
     def reset(self):
         self.state.reset()
@@ -1984,7 +2337,15 @@ class BaselineAgent(AgentBase):
     def draw_action(self, obs):
         self.state.update_observation(self.get_joint_pos(obs), self.get_joint_vel(obs), self.get_puck_pos(obs))
 
+        it = 0
+        maxit = 5
+
         while True:
+            if it >= maxit:
+                raise PlanningException()
+
+            it += 1
+
             self.tactics_processor[self.state.tactic_current.value].update_tactic()
             activeTactic = self.tactics_processor[self.state.tactic_current.value]
 
@@ -2020,145 +2381,75 @@ def build_agent(env_info, **kwargs):
 
     return BaselineAgent(env_info, **kwargs)
 
-### environment/air_hockey_hit.py ### 
 
-
-class AirHockeyHit(AirHockeySingle):
-    def __init__(self, gamma=0.99, horizon=500, viewer_params=..., **kwargs):
-        super().__init__(gamma, horizon, viewer_params, **kwargs)
-        self.puck_init_pos = np.array([-0.71, 0.0])
-        self.puck_init_vel = np.array([0.0, 0.0])
-        self.hit_range = np.array([[-0.65, -0.25], [-0.4, 0.4]])  # Table Frame
-
-    def setup(self, obs):
-        # Initial position of the puck
-        # puck_pos = np.random.rand(2) * (self.hit_range[:, 1] - self.hit_range[:, 0]) + self.hit_range[:, 0]
-        puck_pos = self.puck_init_pos
-
-        self._write_data("puck_x_pos", puck_pos[0])
-        self._write_data("puck_y_pos", puck_pos[1])
-
-        self._write_data("puck_x_vel", self.puck_init_vel[0])
-        self._write_data("puck_y_vel", self.puck_init_vel[1])
-
-        # if self.moving_init:
-        #     lin_vel = np.random.uniform(self.init_velocity_range[0], self.init_velocity_range[1])
-        #     angle = np.random.uniform(-np.pi / 2 - 0.1, np.pi / 2 + 0.1)
-        #     puck_vel = np.zeros(3)
-        #     puck_vel[0] = -np.cos(angle) * lin_vel
-        #     puck_vel[1] = np.sin(angle) * lin_vel
-        #     puck_vel[2] = np.random.uniform(-2, 2, 1)
-
-        #     self._write_data("puck_x_vel", puck_vel[0])
-        #     self._write_data("puck_y_vel", puck_vel[1])
-        #     self._write_data("puck_yaw_vel", puck_vel[2])
-
-        super().setup(obs)
-
-    def reward(self, obs, action, next_obs, absorbing):
-        return 0
-
-    def is_absorbing(self, obs):
-        puck_pos, puck_vel = self.get_puck(obs)
-        # Stop if the puck bounces back on the opponents wall
-        if puck_pos[0] > 0 and puck_vel[0] < 0:
-            return True
-        return super(AirHockeyHit, self).is_absorbing(obs)
-
-
-class IiwaPositionHit(PositionControlIIWA, AirHockeyHit):
-    def __init__(self, interpolation_order, opponent_agent=None, opponent_interp_order=-1, *args, **kwargs):
-        super().__init__(interpolation_order=interpolation_order, *args, **kwargs)
-
-        # Use default agent when none is provided
-        if opponent_agent is None:
-            self._opponent_agent_gen = self._default_opponent_action_gen()
-            self._opponent_agent = lambda obs: next(self._opponent_agent_gen)
-
-    def setup(self, obs):
-        super().setup(obs)
-        self._opponent_agent_gen = self._default_opponent_action_gen()
-
-    def _default_opponent_action_gen(self):
-        vel = 3
-        t = np.pi / 2
-        cart_offset = np.array([0.65, 0])
-        prev_joint_pos = self.init_state
-
-        while True:
-            t += vel * self.dt
-            cart_pos = np.array([0.1, 0.16]) * np.array([np.sin(t) * np.cos(t), np.cos(t)]) + cart_offset
-
-            success, joint_pos = inverse_kinematics(self.env_info['robot']['robot_model'],
-                                                    self.env_info['robot']['robot_data'],
-                                                    np.concatenate(
-                                                        [cart_pos, [0.1 + self.env_info['robot']['universal_height']]]),
-                                                    initial_q=prev_joint_pos)
-            assert success
-
-            joint_vel = (joint_pos - prev_joint_pos) / self.dt
-
-            prev_joint_pos = joint_pos
-
-            yield np.vstack([joint_pos, joint_vel])
+### environment/air_hockey_hit.py ###
 
 
 ### evaluate.py ###
 def compute_angle_and_velocity(puck_init_pos, puck_init_vel, goal_pos):
     hit_dir = goal_pos - puck_init_pos
     angel = np.arctan2(hit_dir[1], hit_dir[0])
-    velocity_scale = 1.
+    velocity_scale = 1.0
     return angel, velocity_scale
 
 
 def main():
-    viewer_params = {'camera_params': {'static': dict(distance=3.0, elevation=-45.0, azimuth=90.0,
-                                                      lookat=(0., 0., 0.))},
-                     'width': 1440, 'height': 810,
-                     'default_camera_mode': 'static',
-                     'hide_menu_on_startup': True}
+    print("Starting main")
 
-    env = IiwaPositionHit(interpolation_order=-1, viewer_params=viewer_params, horizon=200)
-    agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit', max_hit_velocity=1.0)
+    agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic=None, max_hit_velocity=1.0)
 
-    n_episodes = 100
+    n_episodes = 500
     env.reset()
 
     return_history = []
 
     for i in range(n_episodes):
-        done = False
-        
-        env.puck_init_pos = np.random.rand(2) * (env.hit_range[:, 1] - env.hit_range[:, 0]) + env.hit_range[:, 0]
-        env.puck_init_vel = np.random.rand(2) * 0.2
-        obs = env.reset()
-        puck_pos = obs[:2] - np.array([1.51, 0.])
-        puck_vel = obs[3:5]
-        goal_pos = np.array([0.938, 0.0])
+        try:
+            done = False
 
-        angle, velocity_scale = compute_angle_and_velocity(puck_init_pos=puck_pos, puck_init_vel=puck_vel, goal_pos=goal_pos)
-        agent.set_instruction({'hit_angle': angle, 'hit_velocity': velocity_scale})
+            env.puck_init_pos = np.random.rand(2) * (env.hit_range[:, 1] - env.hit_range[:, 0]) + env.hit_range[:, 0]
+            env.puck_init_vel = np.random.rand(2) * 0.2
+            obs = env.reset()
+            puck_pos = obs[:2] - np.array([1.51, 0.0])
+            puck_vel = obs[3:5]
+            goal_pos = np.array([0.938, 0.0])
 
-        n_steps = 0
-        hit_puck_vel = 0.
-        while n_steps < env.info.horizon:
-            action = agent.draw_action(obs)
-            obs, reward, done, info = env.step(action)
-            env.render()
-            n_steps += 1
-            if np.linalg.norm(hit_puck_vel) == 0. and obs[0] >= 1.51:
-                hit_puck_vel = obs[3:5]
-            if done:
-                break
+            angle, velocity_scale = compute_angle_and_velocity(
+                puck_init_pos=puck_pos, puck_init_vel=puck_vel, goal_pos=goal_pos
+            )
+            agent.set_instruction({"hit_angle": angle, "hit_velocity": velocity_scale})
 
-        puck_final_pos = obs[:2] - np.array([1.51, 0.])
-        dist_to_goal = np.linalg.norm(puck_final_pos - goal_pos)
+            n_steps = 0
+            hit_puck_vel = 0.0
+            while n_steps < env.info.horizon:
+                action = agent.draw_action(obs)
+                obs, reward, done, info = env.step(action)
+                # env.render()
+                n_steps += 1
+                if np.linalg.norm(hit_puck_vel) == 0.0 and obs[0] >= 1.51:
+                    hit_puck_vel = obs[3:5]
+                if done:
+                    break
 
-        return_history.append(dist_to_goal)
+            puck_final_pos = obs[:2] - np.array([1.51, 0.0])
+            dist_to_goal = np.linalg.norm(puck_final_pos - goal_pos)
 
-    env.close()
-    return return_history
+            print("Ep", i + 1, "/", n_episodes, dist_to_goal < 0.1)
+
+            return_history.append(dist_to_goal)
+
+        except:
+            print(traceback.format_exc())
+            print("Ep", i + 1, "/", n_episodes, False)
+            return_history.append(False)
+
+    # env.close()
+
+    success = float(sum([d < 0.1 for d in return_history])) / float(n_episodes)
+
+    print("SCORE:", success)
+
+    return success
 
 
-if __name__ == "__main__":
-    main()
+score = main()
