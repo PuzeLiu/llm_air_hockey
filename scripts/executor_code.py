@@ -685,6 +685,7 @@ try:
     params_path = sys.argv[1]
     # user provided parameter file - load these
     agent_params.parse_json(params_path)
+    print("Loaded parameters")
 except:
     pass
 
@@ -2442,7 +2443,7 @@ def main():
 
             print("Ep", i + 1, "/", n_episodes, dist_to_goal < 0.1)
 
-            return_history.append(dist_to_goal)
+            return_history.append(dist_to_goal < 0.1)
 
         except:
             print(traceback.format_exc())
@@ -2451,7 +2452,7 @@ def main():
 
     # env.close()
 
-    success = float(sum([d < 0.1 for d in return_history])) / float(n_episodes)
+    success = float(sum(return_history)) / float(n_episodes)
 
     print("SCORE:", success)
 
