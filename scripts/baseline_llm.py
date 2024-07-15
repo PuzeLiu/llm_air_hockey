@@ -120,7 +120,7 @@ def main(port, prompt_dir):
                      'hide_menu_on_startup': True}
 
     env = IiwaPositionHit(interpolation_order=-1, viewer_params=viewer_params, horizon=200)
-    agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit', max_hit_velocity=1.0)
+    agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit')
 
     jinja_env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(prompt_dir),

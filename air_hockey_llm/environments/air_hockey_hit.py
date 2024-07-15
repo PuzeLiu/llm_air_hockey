@@ -5,7 +5,7 @@ from air_hockey_challenge.utils.kinematics import inverse_kinematics
 
 
 class AirHockeyHit(AirHockeySingle):
-    def __init__(self, gamma=0.99, horizon=500, viewer_params=..., **kwargs):
+    def __init__(self, gamma=0.99, horizon=500, viewer_params={}, **kwargs):
         super().__init__(gamma, horizon, viewer_params, **kwargs)
         self.puck_init_pos = np.array([-0.71, 0.0])
         self.puck_init_vel = np.array([0.0, 0.0])
