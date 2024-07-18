@@ -2408,7 +2408,7 @@ def main():
 
     agent = BaselineAgent(env_info=env.env_info, agent_id=1, only_tactic='hit', max_hit_velocity=1.0)
 
-    n_episodes = 250 # 500
+    n_episodes = 500
     env.reset()
 
     return_history = []
@@ -2457,7 +2457,7 @@ def main():
 
     success = float(sum(return_history)) / float(n_episodes)
 
-    print("SCORE:", success)
+    print("SCORE (executor_script):", success)
 
     return success
 
